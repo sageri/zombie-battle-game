@@ -5,7 +5,7 @@
 //   node verify/engine.test.mjs
 //
 // * Node 組み込み機能のみ使用（サードパーティ依存ゼロ）。
-// * 読み込み対象は src/engine.js / src/ui.js / index.html
+// * 読み込み対象は src/engine.js / src/ui.js / src/index.html
 //   （いずれも一切書き換えない）。
 // * 両スクリプトを最小 DOM スタブ（Proxy の偽要素:
 //   addEventListener / querySelector / value / textContent / innerHTML 等
@@ -39,7 +39,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const INDEX_HTML_PATH = path.resolve(here, '..', 'index.html');
+const INDEX_HTML_PATH = path.resolve(here, '..', 'src', 'index.html');
 const ENGINE_PATH = path.resolve(here, '..', 'src', 'engine.js');
 const UI_PATH = path.resolve(here, '..', 'src', 'ui.js');
 
@@ -205,12 +205,12 @@ function makeDocumentStub() {
 
 // ------------------- src/engine.js・src/ui.js から GameEngine を組み立てる
 function loadGameEngine(engineSrc, uiSrc, html) {
-  const iEngine = html.indexOf('<script src="src/engine.js">');
-  const iUi = html.indexOf('<script src="src/ui.js">');
-  check(iEngine !== -1, 'index.html が src/engine.js を参照する');
-  check(iUi !== -1, 'index.html が src/ui.js を参照する');
+  const iEngine = html.indexOf('<script src="engine.js">');
+  const iUi = html.indexOf('<script src="ui.js">');
+  check(iEngine !== -1, 'src/index.html が engine.js を参照する');
+  check(iUi !== -1, 'src/index.html が ui.js を参照する');
   if (iEngine !== -1 && iUi !== -1) {
-    check(iEngine < iUi, 'index.html は src/engine.js を src/ui.js より先に読む');
+    check(iEngine < iUi, 'src/index.html は engine.js を ui.js より先に読む');
   }
   const doc = makeDocumentStub();
   const sandbox = {

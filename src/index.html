@@ -3,8 +3,8 @@
 ======================================================================
  丧尸 vs 人类 自动战斗器
 ======================================================================
-構成: スタイル src/styles.css / エンジン src/engine.js / UI src/ui.js。
-GameEngine / GameUI の API ドキュメントは src/engine.js 冒頭の
+構成: 本ファイル（入口）+ styles.css / engine.js / ui.js（全て src/ 内）。
+GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
 コメント塊を参照。
 ======================================================================
 -->
@@ -13,7 +13,7 @@ GameEngine / GameUI の API ドキュメントは src/engine.js 冒頭の
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>丧尸 vs 人类 自动战斗器</title>
-<link rel="stylesheet" href="src/styles.css">
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <h1>丧尸 vs 人类 自动战斗器</h1>
@@ -60,7 +60,7 @@ GameEngine / GameUI の API ドキュメントは src/engine.js 冒頭の
   <div id="battle-log" class="log"></div>
 </section>
 
-<script src="src/engine.js"></script>
-<script src="src/ui.js"></script>
+<script src="engine.js"></script>
+<script src="ui.js"></script>
 </body>
 </html>

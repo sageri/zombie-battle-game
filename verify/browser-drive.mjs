@@ -19,11 +19,12 @@ import { spawn, execSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SHOT_DIR = join(ROOT, 'verify', 'screenshots');
-const PAGE_URL = 'file:///C:/CS/PY/93.Gm1/src/index.html';
+// スクリプト自身の位置から解決する（リポジトリ移動・他マシンでも成立）
+const PAGE_URL = pathToFileURL(join(ROOT, 'src', 'index.html')).href;
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

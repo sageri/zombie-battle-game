@@ -78,7 +78,7 @@
   .grid-cell { border: 1px solid #ececec; }
   .grid-cell.alt { background: #f6f8f6; }
 
-  /* ---- キャラカード（マス内の紧凑卡: Emoji + 迷你血条、名前は title） --- */
+  /* ---- キャラカード（マス内コンパクトカード: Emoji + ミニ血条、名前は title） --- */
   .unit-card {
     position: absolute; left: 0; top: 0;
     width: 44px; height: 44px;

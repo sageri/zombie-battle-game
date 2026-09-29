@@ -5,8 +5,9 @@
 //   node verify/engine.test.mjs
 //
 // * Node 組み込み機能のみ使用（サードパーティ依存ゼロ）。
-// * index.html は読み込むだけで、一切書き換えない。
-// * index.html から <script> を抽出し、最小 DOM スタブ（Proxy の偽要素:
+// * 読み込み対象は src/engine.js / src/ui.js / index.html
+//   （いずれも一切書き換えない）。
+// * 両スクリプトを最小 DOM スタブ（Proxy の偽要素:
 //   addEventListener / querySelector / value / textContent / innerHTML 等
 //   を飲み込む）上でサンドボックス評価し、window.GameEngine と
 //   window.GameUI を取得する。
@@ -29,9 +30,8 @@
 // 出力: 最終行に必ず RESULT {"assertions":N,"failures":[...]} を出す。
 //       全件パスなら exit 0、失敗があれば exit 1。
 //
-// 仕様参照: index.html 冒頭の GameEngine/GameUI API コメント塊
-//           （2〜136 行目）、実装本体 script#game-engine（334〜786 行目）、
-//           UI 層 script（788〜1337 行目）、docs/adr/0001。
+// 仕様参照: src/engine.js 冒頭の GameEngine/GameUI API コメント塊、
+//           src/engine.js・src/ui.js の実装本体、docs/adr/0001・0002。
 // ======================================================================
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -40,6 +40,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_HTML_PATH = path.resolve(here, '..', 'index.html');
+const ENGINE_PATH = path.resolve(here, '..', 'src', 'engine.js');
+const UI_PATH = path.resolve(here, '..', 'src', 'ui.js');
 
 // ------------------------------------------------ アサーション設備
 let assertions = 0;
@@ -65,7 +67,7 @@ function checkEq(actual, expected, label) {
 }
 
 // --------------------------------------- 乱数スクリプト用ヘルパ
-// 引擎の公表セマンティクス（index.html 200〜207 行目の実装）:
+// 引擎の公表セマンティクス（src/engine.js の実装）:
 //   rollD(sides) = floor(rng() * sides) + 1
 //   randInt(min,max) = min + floor(rng() * (max - min + 1))
 // 指定値 v を出す生乱数 r は「積が k+0.5 の中点に来る」よう逆算する。
@@ -201,22 +203,15 @@ function makeDocumentStub() {
   };
 }
 
-// -------------------------------- index.html から GameEngine を取出す
-function extractScripts(html) {
-  const engineScripts = [];
-  const otherScripts = [];
-  const re = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    if (/\bid\s*=\s*["']?game-engine/i.test(m[1] || '')) engineScripts.push(m[2]);
-    else otherScripts.push(m[2]);
+// ------------------- src/engine.js・src/ui.js から GameEngine を組み立てる
+function loadGameEngine(engineSrc, uiSrc, html) {
+  const iEngine = html.indexOf('<script src="src/engine.js">');
+  const iUi = html.indexOf('<script src="src/ui.js">');
+  check(iEngine !== -1, 'index.html が src/engine.js を参照する');
+  check(iUi !== -1, 'index.html が src/ui.js を参照する');
+  if (iEngine !== -1 && iUi !== -1) {
+    check(iEngine < iUi, 'index.html は src/engine.js を src/ui.js より先に読む');
   }
-  return { engineScripts, otherScripts };
-}
-
-function loadGameEngine(html) {
-  const { engineScripts, otherScripts } = extractScripts(html);
-  checkEq(engineScripts.length, 1, 'script#game-engine は 1 個ある');
   const doc = makeDocumentStub();
   const sandbox = {
     window: { document: doc },
@@ -225,13 +220,10 @@ function loadGameEngine(html) {
     console: { log() {}, warn() {}, error() {} },
   };
   vm.createContext(sandbox);
-  for (const src of engineScripts) {
-    vm.runInContext(src, sandbox, { filename: 'index.html#game-engine' });
-  }
-  // UI 側 <script> もスタブ DOM 上で評価を通す（エンジン評価の後）
-  otherScripts.forEach((src, i) => {
-    vm.runInContext(src, sandbox, { filename: 'index.html#inline-' + i });
-  });
+  vm.runInContext(engineSrc, sandbox, { filename: 'src/engine.js' });
+  // UI 側もスタブ DOM 上で評価を通す（エンジン評価の後。UI は window.GameEngine
+  // に依存するため順序は固定）
+  vm.runInContext(uiSrc, sandbox, { filename: 'src/ui.js' });
   const GE = sandbox.window.GameEngine || sandbox.module.exports;
   check(!!GE, 'window.GameEngine（または module.exports）が公開されている');
   // UI 層の公開面と評価に使った document スタブを UI 流程テスト用に保持する
@@ -242,8 +234,8 @@ function loadGameEngine(html) {
 }
 
 // ------------------------------------------- ログ書式リテラルの裏取り
-// 正規表現に埋め込る書式断片は、index.html の実装（449〜479 行目等）から
-// 採取したリテラル。html 内に実在しない断片を使っていたら、実装でなく
+// 正規表現に埋め込る書式断片は、src/engine.js の実装から採取したリテラル。
+// ゲームソース内に実在しない断片を使っていたら、実装でなく
 // テスト側の写し間違いとして即検出できるようにする。
 const LOG_LITERALS = {
   headSep: ' → ',
@@ -272,10 +264,10 @@ const LOG_LITERALS = {
   pairSep: '、',
   histSep: '→',
 };
-function checkLogLiterals(html) {
+function checkLogLiterals(gameSrc) {
   for (const k of Object.keys(LOG_LITERALS)) {
-    check(html.includes(LOG_LITERALS[k]),
-      'ログ書式リテラル「' + LOG_LITERALS[k] + '」が index.html に実在する（' + k + '）');
+    check(gameSrc.includes(LOG_LITERALS[k]),
+      'ログ書式リテラル「' + LOG_LITERALS[k] + '」がゲームソース（src/engine.js / src/ui.js）に実在する（' + k + '）');
   }
 }
 
@@ -753,13 +745,15 @@ function verifyStateAndLog(state, cfg, label) {
 
 // ============================================================ 本体
 function main() {
+  const engineSrc = readFileSync(ENGINE_PATH, 'utf8');
+  const uiSrc = readFileSync(UI_PATH, 'utf8');
   const html = readFileSync(INDEX_HTML_PATH, 'utf8');
-  checkLogLiterals(html);
+  checkLogLiterals(engineSrc + uiSrc);
 
-  GE = loadGameEngine(html);
+  GE = loadGameEngine(engineSrc, uiSrc, html);
   if (!GE) throw new Error('GameEngine を取得できなかったため、以降の検証を継続できない');
 
-  // --- API 表面（先頭コメント 25〜41 行目の公表 API） ---
+  // --- API 表面（src/engine.js 冒頭コメントの公表 API） ---
   for (const k of ['MAX_STEPS', 'DEFAULT_CONFIG', 'FACTION_LABEL', 'NAME_PREFIX',
     'createRng', 'rollD', 'randInt', 'validateConfig', 'createBattleState',
     'rollInitiative', 'takeTurn', 'runBattle']) {

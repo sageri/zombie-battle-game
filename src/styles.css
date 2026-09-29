@@ -1,0 +1,143 @@
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 16px;
+    color: #222;
+    background: #fafafa;
+    line-height: 1.55;
+  }
+  h1 { font-size: 22px; margin: 4px 0 12px; }
+  h2 { font-size: 16px; margin: 10px 0 6px; }
+  .hint { color: #777; font-size: 13px; margin: 2px 0 10px; }
+  .factions { display: flex; gap: 12px; flex-wrap: wrap; }
+  fieldset.faction {
+    flex: 1 1 340px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    padding: 6px 14px 12px;
+    margin: 0;
+  }
+  fieldset.faction.human legend { color: #1a5fb4; font-weight: bold; padding: 0 6px; }
+  fieldset.faction.zombie legend { color: #a51d2d; font-weight: bold; padding: 0 6px; }
+  .field { display: inline-flex; align-items: center; gap: 6px; margin: 6px 14px 2px 0; font-size: 14px; }
+  .field input { width: 84px; padding: 2px 4px; }
+  .error { color: #c01c28; font-size: 14px; min-height: 1.2em; margin: 8px 0 4px; }
+  .actions { margin: 4px 0 8px; }
+  button { padding: 6px 20px; font-size: 14px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  button.small { padding: 1px 10px; font-size: 12px; font-weight: normal; }
+
+  /* ---- 戦場ページ：操作バー ---------------------------------------- */
+  .battle-bar { display: flex; align-items: center; gap: 8px; margin: 2px 0 10px; flex-wrap: wrap; }
+  .bar-label { font-size: 14px; color: #555; }
+  .bar-gap { flex: 1 1 0; }
+  .speed-btn { padding: 4px 16px; }
+  .speed-btn.active { background: #1a5fb4; border-color: #1a5fb4; color: #fff; }
+
+  /* ---- 順序帯 -------------------------------------------------------- */
+  #order-strip {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 8px; border: 1px solid #ccc; border-radius: 6px;
+    background: #fff; min-height: 56px;
+  }
+  .chip {
+    width: 62px; text-align: center;
+    border: 1px solid #ddd; border-radius: 6px; background: #fff;
+    padding: 4px 2px 2px; position: relative;
+    transition: transform .15s ease, border-color .15s ease,
+                background .15s ease, opacity .2s ease;
+  }
+  .chip-emoji { font-size: 20px; line-height: 1.2; }
+  .chip-name { font-size: 11px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip.active {
+    transform: scale(1.18);
+    border-color: #e8a33d; background: #fff7e0;
+    box-shadow: 0 0 8px rgba(232, 163, 61, .75);
+    z-index: 2;
+  }
+  .chip.downed { opacity: .45; filter: grayscale(1); }
+
+  /* ---- 戦場（左右対峙の折り返しグリッド） ---------------------------- */
+  #battlefield { display: flex; gap: 12px; align-items: flex-start; margin: 26px 0 14px; }
+  .side { flex: 1 1 0; min-width: 0; }
+  .side-label { font-weight: bold; font-size: 14px; margin-bottom: 8px; }
+  .side-label.human { color: #1a5fb4; }
+  .side-label.zombie { color: #a51d2d; text-align: right; }
+  .side-grid { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
+  .zombie-side .side-grid { justify-content: flex-end; }
+  .vs-mark { align-self: center; font-weight: bold; color: #bbb; font-size: 15px; flex: 0 0 auto; }
+
+  /* ---- キャラカード（Emoji + 名前 + 血条） --------------------------- */
+  .unit-card {
+    width: 86px;
+    border: 1px solid #ccc; border-radius: 6px; background: #fff;
+    padding: 8px 4px 6px; text-align: center; position: relative;
+    transition: opacity .2s ease, border-color .2s ease, box-shadow .2s ease;
+  }
+  .unit-card.human { border-top: 3px solid #1a5fb4; }
+  .unit-card.zombie { border-top: 3px solid #a51d2d; }
+  .unit-card.current { border-color: #e8a33d; box-shadow: 0 0 6px rgba(232, 163, 61, .8); }
+  .unit-card.downed { opacity: .45; filter: grayscale(1); }
+  .unit-emoji { font-size: 26px; line-height: 1.2; }
+  .unit-name { font-size: 12px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hp-bar { height: 8px; background: #e5e5e5; border-radius: 4px; overflow: hidden; margin-top: 5px; }
+  .hp-fill { height: 100%; width: 100%; background: #3fa34d; border-radius: 4px; transition: width .45s ease; }
+  .hp-num { font-size: 11px; color: #666; margin-top: 2px; font-family: Consolas, monospace; }
+
+  /* ---- 飘字（カード頭上に浮かんで消える） ---------------------------- */
+  .float-layer { position: absolute; left: 0; right: 0; top: -10px; height: 0; pointer-events: none; z-index: 5; }
+  .float-text {
+    position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+    white-space: nowrap; font-weight: bold; font-size: 13px;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff;
+    animation: float-up .9s ease-out forwards;
+  }
+  .float-info { color: #333; }
+  .float-damage { color: #c01c28; font-size: 15px; }
+  @keyframes float-up {
+    from { opacity: 1; transform: translate(-50%, 0); }
+    to   { opacity: 0; transform: translate(-50%, -34px); }
+  }
+
+  /* ---- 被弾ライトアニメ（赤フラッシュ + 揺れ） ------------------------ */
+  .unit-card.hit-flash { animation: hit-flash .5s ease; }
+  @keyframes hit-flash {
+    0%   { background: #fff; }
+    25%  { background: #ffd2d2; transform: translateX(-3px); }
+    50%  { background: #ffb3b3; transform: translateX(3px); }
+    75%  { background: #ffd2d2; transform: translateX(-2px); }
+    100% { background: #fff; transform: none; }
+  }
+
+  /* ---- 終局バナー ---------------------------------------------------- */
+  #battle-banner {
+    border: 2px solid #1a7f37; background: #eaf6ee; border-radius: 6px;
+    padding: 10px 16px; margin: 12px 0; text-align: center;
+  }
+  #battle-banner.draw { border-color: #b26a00; background: #fff7e0; }
+  #banner-title { font-size: 18px; font-weight: bold; margin: 2px 0; }
+  .banner-body { white-space: pre-line; margin: 2px 0; font-size: 14px; font-family: inherit; }
+
+  /* ---- 戦闘ログ ------------------------------------------------------ */
+  .log {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    border: 1px solid #ccc;
+    background: #fff;
+    border-radius: 6px;
+    padding: 8px 12px;
+    max-height: 460px;
+    overflow-y: auto;
+  }
+  .log-round { font-weight: bold; color: #666; margin-top: 8px; }
+  .log-order-header { font-weight: bold; margin-top: 4px; }
+  .log-order { color: #333; }
+  .log-reroll { color: #b26a00; }
+  .log-action-fail { color: #9a9a9a; }
+  .log-action-dodge { color: #1c5d99; }
+  .log-action-hit { color: #222; }
+  .log-victory { font-weight: bold; color: #1a7f37; margin-top: 6px; }

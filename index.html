@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<!--
+======================================================================
+ GameEngine API（戦闘エンジン：DOM と完全分離された純関数集合）
+======================================================================
+■ 形態
+  * エンジン本体は script#game-engine タグ内にあり、window.GameEngine
+    として公開する。DOM・UI には一切依存しない。
+  * state は JSON 化可能なプレーンデータのみで構成する。公開関数は入力を
+    破壊せず新しい state を返す（runBattle は内部で作業コピーを書き換える
+    が、外部から見れば純関数である）。
+
+■ 乱数の注入
+  * d100 / d7 / ダメージのすべてのロールは最終引数 rng（() => [0,1) の乱数）
+    を経由する。省略した場合は Math.random を使う。
+  * GameEngine.createRng(seed) で mulberry32 ベースの再現可能な乱数源を
+    作れる（テスト・デバッグ用）。
+
+■ Node から利用する（テスト用）
+  * index.html から script#game-engine タグの中身を文字列として取り出し、
+    例えば vm.runInNewContext(src, { module: { exports: {} } }) のように
+    評価すると、sandbox.module.exports から GameEngine を取得できる。
+    （window が無い環境では module.exports 側に公開するため。）
+
+■ API 一覧
+  GameEngine.MAX_STEPS                  : 無限ループ防止のステップ上限。書き換え可（既定 100000）
+  GameEngine.DEFAULT_CONFIG             : 既定設定 { human: {...}, zombie: {...} }
+  GameEngine.FACTION_LABEL              : 陣営表示名 { human: '人类阵营', zombie: '丧尸阵营' }
+  GameEngine.NAME_PREFIX                : メンバー名の接頭辞 { human: '玩家', zombie: '丧尸' }
+  GameEngine.createRng(seed)            : () => [0,1) の種付き乱数源を返す
+  GameEngine.rollD(sides, rng?)         : 1..sides の整数
+  GameEngine.randInt(min, max, rng?)    : min..max の整数（両端を含む）
+  GameEngine.validateConfig(config)     : 設定検査。不備の簡体中文メッセージ配列（空配列なら正当）
+  GameEngine.createBattleState(config)  : 初期 state（未ダイス）を返す
+  GameEngine.rollInitiative(state, rng?): d100 で先攻順を決定する。同点者はその組だけで
+                                          重投を繰り返し（重投点は組内のみで比較し、
+                                          組内で順位が分かるまで）、過程をログに残す。
+                                          新しい state を返す
+  GameEngine.takeTurn(state, rng?)      : 現在の行動者の行動を 1 回実行。新しい state を返す
+  GameEngine.runBattle(config, rng?)    : 設定検査 → state 生成 → 先攻決定 → 行動ループで
+                                          完走させ、最終 state を返す（不正設定は例外）
+
+■ config / state の形
+  config = {
+    human:  { count, hp, attack, agility, dmgMin, dmgMax },
+    zombie: { count, hp, attack, agility, dmgMin, dmgMax }
+  }
+  state = {
+    members:  [ { name, faction: 'human'|'zombie', maxHp, hp, attack,
+                  agility, dmgMin, dmgMax, downed } ... ],
+    order:    [ メンバー名 ... ]（行動順。戦闘中は不変）,
+    rolls:    { メンバー名: d100 出目の履歴 [第1投, 重投1, ...] },
+    turnIndex, round, steps,
+    finished: boolean,
+    winner:   'human' | 'zombie' | 'draw' | null,
+    survivors:[ { name, hp, maxHp } ... ]（勝利側の生存者）,
+    log:      [ { type, text } ... ]（type: order-header / order / reroll /
+                                          round / action-fail / action-dodge /
+                                          action-hit / victory）
+  }
+======================================================================
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>丧尸 vs 人类 自动战斗器</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 16px;
+    color: #222;
+    background: #fafafa;
+    line-height: 1.55;
+  }
+  h1 { font-size: 22px; margin: 4px 0 12px; }
+  h2 { font-size: 16px; margin: 10px 0 6px; }
+  .hint { color: #777; font-size: 13px; margin: 2px 0 10px; }
+  .factions { display: flex; gap: 12px; flex-wrap: wrap; }
+  fieldset.faction {
+    flex: 1 1 340px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    padding: 6px 14px 12px;
+    margin: 0;
+  }
+  fieldset.faction.human legend { color: #1a5fb4; font-weight: bold; padding: 0 6px; }
+  fieldset.faction.zombie legend { color: #a51d2d; font-weight: bold; padding: 0 6px; }
+  .field { display: inline-flex; align-items: center; gap: 6px; margin: 6px 14px 2px 0; font-size: 14px; }
+  .field input { width: 84px; padding: 2px 4px; }
+  .error { color: #c01c28; font-size: 14px; min-height: 1.2em; margin: 8px 0 4px; }
+  .actions { margin: 4px 0 8px; }
+  button { padding: 6px 20px; font-size: 14px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  button.small { padding: 1px 10px; font-size: 12px; font-weight: normal; }
+  #result {
+    border: 1px solid #1a7f37;
+    background: #eaf6ee;
+    border-radius: 6px;
+    padding: 6px 14px 10px;
+    margin: 10px 0;
+  }
+  #result-title { margin: 4px 0; }
+  #result-text { white-space: pre-line; margin: 2px 0; font-family: inherit; font-size: 14px; }
+  .log {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    border: 1px solid #ccc;
+    background: #fff;
+    border-radius: 6px;
+    padding: 8px 12px;
+    max-height: 460px;
+    overflow-y: auto;
+  }
+  .log-round { font-weight: bold; color: #666; margin-top: 8px; }
+  .log-order-header { font-weight: bold; margin-top: 4px; }
+  .log-order { color: #333; }
+  .log-reroll { color: #b26a00; }
+  .log-action-fail { color: #9a9a9a; }
+  .log-action-dodge { color: #1c5d99; }
+  .log-action-hit { color: #222; }
+  .log-victory { font-weight: bold; color: #1a7f37; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>丧尸 vs 人类 自动战斗器</h1>
+
+<section id="config-section">
+  <h2>阵营配置</h2>
+  <p class="hint">调整两边的成员人数与属性后点「开战」；开战后配置锁定，点「重置」可重新调整。</p>
+  <div id="faction-configs" class="factions"></div>
+  <div id="config-error" class="error"></div>
+  <div class="actions">
+    <button id="btn-start">开战</button>
+    <button id="btn-reset" hidden>重置</button>
+  </div>
+</section>
+
+<section id="result" hidden>
+  <h2 id="result-title"></h2>
+  <pre id="result-text"></pre>
+</section>
+
+<section id="log-section">
+  <h2>战斗日志 <button id="btn-clear-log" class="small">清空日志</button></h2>
+  <div id="battle-log" class="log"></div>
+</section>
+
+<script id="game-engine">
+/* =====================================================================
+ * 戦闘エンジン（DOM 非依存の純関数集合）
+ * API の詳細と Node からの取り出し方はファイル先頭のコメント塊を参照。
+ * ===================================================================== */
+(function () {
+  'use strict';
+
+  // 仕様書のデフォルト値
+  var DEFAULT_CONFIG = {
+    human:  { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
+    zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 }
+  };
+
+  // 表示用ラベル（UI 文案は簡体中文）
+  var NAME_PREFIX = { human: '玩家', zombie: '丧尸' };
+  var FACTION_LABEL = { human: '人类阵营', zombie: '丧尸阵营' };
+
+  var api = {
+    // 無限ループ防止の安全上限（テストから差し替え可能）
+    MAX_STEPS: 100000,
+    DEFAULT_CONFIG: DEFAULT_CONFIG,
+    FACTION_LABEL: FACTION_LABEL,
+    NAME_PREFIX: NAME_PREFIX
+  };
+
+  // ---- 乱数 ----------------------------------------------------------
+
+  // 種付き乱数源（mulberry32）。テストでの再現用。
+  api.createRng = function (seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0;
+      a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+
+  // rng 未指定なら Math.random を使う
+  function normRng(rng) {
+    return typeof rng === 'function' ? rng : Math.random;
+  }
+
+  // 1..sides の整数ダイス
+  api.rollD = function (sides, rng) {
+    return Math.floor(normRng(rng)() * sides) + 1;
+  };
+
+  // min..max の整数（両端を含む）
+  api.randInt = function (min, max, rng) {
+    return min + Math.floor(normRng(rng)() * (max - min + 1));
+  };
+
+  // ---- 設定検査 ------------------------------------------------------
+
+  // 数値 1 項分の整数・範囲検査
+  function checkInt(errors, label, name, value, min, max) {
+    if (typeof value !== 'number' || !isFinite(value) || Math.floor(value) !== value) {
+      errors.push(label + '的' + name + '必须是整数');
+      return;
+    }
+    if (value < min || value > max) {
+      errors.push(label + '的' + name + '必须在 ' + min + '～' + max + ' 之间');
+    }
+  }
+
+  // 設定を検査し、不備のメッセージ配列を返す（空配列なら正当）
+  api.validateConfig = function (config) {
+    var errors = [];
+    var factions = ['human', 'zombie'];
+    for (var i = 0; i < factions.length; i++) {
+      var f = factions[i];
+      var label = FACTION_LABEL[f];
+      var c = config ? config[f] : null;
+      if (!c || typeof c !== 'object') {
+        errors.push(label + '的配置缺失');
+        continue;
+      }
+      checkInt(errors, label, '人数', c.count, 1, 99);
+      checkInt(errors, label, 'HP', c.hp, 1, 9999);
+      checkInt(errors, label, '攻击', c.attack, 0, 99);
+      checkInt(errors, label, '敏捷', c.agility, 0, 99);
+      checkInt(errors, label, '伤害下限', c.dmgMin, 0, 9999);
+      checkInt(errors, label, '伤害上限', c.dmgMax, 0, 9999);
+      if (typeof c.dmgMin === 'number' && typeof c.dmgMax === 'number'
+          && isFinite(c.dmgMin) && isFinite(c.dmgMax) && c.dmgMin > c.dmgMax) {
+        errors.push(label + '的伤害下限不能大于伤害上限');
+      }
+    }
+    return errors;
+  };
+
+  // ---- state 生成 ----------------------------------------------------
+
+  // メンバー 1 人を生成する
+  function makeMember(faction, index, stats) {
+    return {
+      name: NAME_PREFIX[faction] + index,
+      faction: faction,
+      maxHp: stats.hp,
+      hp: stats.hp,
+      attack: stats.attack,
+      agility: stats.agility,
+      dmgMin: stats.dmgMin,
+      dmgMax: stats.dmgMax,
+      downed: false
+    };
+  }
+
+  // プレーンデータの複製（state は JSON 化可能なデータのみで構成する）
+  function clone(obj) {
+    if (typeof structuredClone === 'function') return structuredClone(obj);
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  // 初期 state を生成する（config は書き換えない）
+  api.createBattleState = function (config) {
+    var members = [];
+    var i;
+    for (i = 1; i <= config.human.count; i++) members.push(makeMember('human', i, config.human));
+    for (i = 1; i <= config.zombie.count; i++) members.push(makeMember('zombie', i, config.zombie));
+    return {
+      members: members,   // 全メンバー（両陣営）
+      order: [],          // 行動順（メンバー名の配列、戦闘中不変）
+      rolls: {},          // メンバー名 → 先攻 d100 出目
+      turnIndex: 0,       // order 内の現在位置
+      round: 0,           // 現在のラウンド（rollInitiative で 1 になる）
+      steps: 0,           // 実行済みステップ数（安全上限カウンタ）
+      finished: false,
+      winner: null,       // 'human' | 'zombie' | 'draw' | null
+      survivors: [],      // 勝利側の生存者 [{name, hp, maxHp}]
+      log: []             // {type, text} の配列
+    };
+  };
+
+  // ---- 先攻順 --------------------------------------------------------
+
+  // 全員が d100 を 1 回ずつ振り、点数の大きい順に行動する。
+  // 同点者は「その組だけ」取り出して各自重投し、重投点は組内だけで比較する
+  //（組と外部との前后関係は元の点数で確定済み）。組内にまだ同点者がいれば、
+  // その者だけをさらに重投し、組内で完全に順位が分かるまで繰り返す。
+  // 最終順序は「各メンバーが得た点数列の辞書順降順」と一致する。
+  function cmpRollsDesc(a, b) {
+    var n = Math.min(a.length, b.length);
+    for (var i = 0; i < n; i++) {
+      if (a[i] !== b[i]) return b[i] - a[i];
+    }
+    return b.length - a.length; // 保険（通常はここへ到達しない）
+  }
+
+  api.rollInitiative = function (state, rng) {
+    var s = clone(state);
+    var r = normRng(rng);
+    var i;
+    // メンバー名 → ダイス履歴 [第1投, 重投1, ...]（末尾が現在の有効値）
+    var history = {};
+    var names = s.members.map(function (m) { return m.name; });
+    for (i = 0; i < names.length; i++) {
+      history[names[i]] = [api.rollD(100, r)];
+    }
+    var batches = 0;
+    // 同点グループの解消（group: 同じ有効値を持つメンバー名の配列）
+    function resolveGroup(group) {
+      if (group.length < 2) return;
+      batches++;
+      if (batches > 10000) {
+        // 公正な乱数では実質到達不能（悪意ある rng 注入などの保険）
+        throw new Error('先攻重投超过安全次数上限');
+      }
+      var anchor = history[group[0]][history[group[0]].length - 1];
+      group.forEach(function (n) { history[n].push(api.rollD(100, r)); });
+      s.log.push({
+        type: 'reroll',
+        text: '【先攻重投】' + group.join('、') + '（同为 ' + anchor + ' 点）重投 d100：'
+            + group.map(function (n) {
+                var h = history[n];
+                return n + '→' + h[h.length - 1];
+              }).join('、')
+      });
+      // 重投後にまだ同点が残れば、その者だけで再重投
+      var byValue = {};
+      group.forEach(function (n) {
+        var h = history[n];
+        var v = h[h.length - 1];
+        (byValue[v] = byValue[v] || []).push(n);
+      });
+      Object.keys(byValue)
+        .sort(function (a, b) { return b - a; })
+        .forEach(function (v) { resolveGroup(byValue[v]); });
+    }
+    // 第 1 投の点数でグループ化し、点数の大きい組から順に解消
+    var byFirst = {};
+    names.forEach(function (n) {
+      var v = history[n][0];
+      (byFirst[v] = byFirst[v] || []).push(n);
+    });
+    Object.keys(byFirst)
+      .sort(function (a, b) { return b - a; })
+      .forEach(function (v) { resolveGroup(byFirst[v]); });
+    // 辞書順降順で最終行動順を確定
+    names.sort(function (a, b) { return cmpRollsDesc(history[a], history[b]); });
+    s.order = names;
+    s.rolls = history;
+    s.round = 1;
+    s.turnIndex = 0;
+    s.log.push({ type: 'order-header', text: '【行动顺序】（d100 点数，从大到小）' });
+    for (i = 0; i < names.length; i++) {
+      s.log.push({
+        type: 'order',
+        text: (i + 1) + '. ' + names[i] + '（d100=' + history[names[i]].join('→') + '）'
+      });
+    }
+    s.log.push({ type: 'round', text: '── 第 1 轮 ──' });
+    return s;
+  };
+
+  // ---- ターン処理 ----------------------------------------------------
+
+  // 名前からメンバーを探す
+  function findMember(s, name) {
+    for (var i = 0; i < s.members.length; i++) {
+      if (s.members[i].name === name) return s.members[i];
+    }
+    return null;
+  }
+
+  // ターン位置を 1 つ進める。末尾に達したら次ラウンドの先頭へ戻し、区切り行を残す。
+  function advanceTurn(s) {
+    s.turnIndex++;
+    if (s.turnIndex >= s.order.length) {
+      s.turnIndex = 0;
+      s.round++;
+      s.log.push({ type: 'round', text: '── 第 ' + s.round + ' 轮 ──' });
+    }
+  }
+
+  // どちらか一方でも全滅していれば戦闘を終了させる
+  function checkBattleEnd(s) {
+    var alive = { human: false, zombie: false };
+    for (var i = 0; i < s.members.length; i++) {
+      var m = s.members[i];
+      if (!m.downed) alive[m.faction] = true;
+    }
+    if (alive.human && alive.zombie) return false;
+    s.finished = true;
+    s.winner = alive.human ? 'human' : (alive.zombie ? 'zombie' : 'draw');
+    if (s.winner === 'draw') {
+      s.survivors = [];
+      s.log.push({ type: 'victory', text: '战斗结束：平局。' });
+    } else {
+      s.survivors = s.members
+        .filter(function (m) { return m.faction === s.winner && !m.downed; })
+        .map(function (m) { return { name: m.name, hp: m.hp, maxHp: m.maxHp }; });
+      var names = s.survivors.map(function (m) {
+        return m.name + '（HP ' + m.hp + '/' + m.maxHp + '）';
+      }).join('、');
+      s.log.push({ type: 'victory', text: '战斗结束：' + FACTION_LABEL[s.winner] + '获胜！存活角色：' + names });
+    }
+    return true;
+  }
+
+  // 現在の行動者の 1 行動を実行する（s を直接書き換える内部用関数）
+  function stepMutate(s, rng) {
+    s.steps++;
+    if (s.steps > api.MAX_STEPS) {
+      s.finished = true;
+      s.winner = 'draw';
+      s.survivors = [];
+      s.log.push({ type: 'victory', text: '已达 ' + api.MAX_STEPS + ' 步行动上限，强制结束：平局。' });
+      return;
+    }
+    var actor = findMember(s, s.order[s.turnIndex]);
+    // 倒地している場合は何もせずスキップ（ログには残さない）
+    if (!actor || actor.downed) {
+      advanceTurn(s);
+      return;
+    }
+    // 対立陣営の未倒地メンバーから無作為に 1 人選ぶ
+    var enemyFaction = actor.faction === 'human' ? 'zombie' : 'human';
+    var targets = s.members.filter(function (m) {
+      return m.faction === enemyFaction && !m.downed;
+    });
+    if (targets.length === 0) {
+      // 通常起こらない（直前の行動後に終了判定済み）。保険として終了判定だけ行う。
+      checkBattleEnd(s);
+      return;
+    }
+    var target = targets[api.randInt(0, targets.length - 1, rng)];
+    var head = actor.name + ' → ' + target.name + '：';
+
+    // 1) 攻撃判定：d7 ＞ 自分の攻撃値 なら失敗
+    var atkRoll = api.rollD(7, rng);
+    if (atkRoll > actor.attack) {
+      s.log.push({
+        type: 'action-fail',
+        text: head + '攻击检定 d7=' + atkRoll + ' ＞ 攻击' + actor.attack + '，攻击失败'
+      });
+      advanceTurn(s);
+      return;
+    }
+
+    // 2) 回避判定：d7 ≤ 目標の敏捷 なら回避成功
+    var dodgeRoll = api.rollD(7, rng);
+    if (dodgeRoll <= target.agility) {
+      s.log.push({
+        type: 'action-dodge',
+        text: head + '攻击检定 d7=' + atkRoll + ' ≤ 攻击' + actor.attack
+            + '，命中；闪避检定 d7=' + dodgeRoll + ' ≤ 敏捷' + target.agility + '，闪避成功'
+      });
+      advanceTurn(s);
+      return;
+    }
+
+    // 3) ダメージ：自身の区間内の整数乱数
+    var dmg = api.randInt(actor.dmgMin, actor.dmgMax, rng);
+    target.hp = Math.max(0, target.hp - dmg);
+    var text = head + '攻击检定 d7=' + atkRoll + ' ≤ 攻击' + actor.attack
+             + '，命中；闪避检定 d7=' + dodgeRoll + ' ＞ 敏捷' + target.agility
+             + '，未闪避；伤害 ' + dmg + '，' + target.name + ' 剩余 HP ' + target.hp;
+    if (target.hp <= 0) {
+      target.downed = true;
+      text += '，倒地！';
+    }
+    s.log.push({ type: 'action-hit', text: text });
+
+    // 行動後に行終了判定（終わっていなければ次のターンへ）
+    if (!checkBattleEnd(s)) {
+      advanceTurn(s);
+    }
+  }
+
+  // 公開版：入力 state を破壊せず、新しい state を返す
+  api.takeTurn = function (state, rng) {
+    if (state.finished) return state;
+    var s = clone(state);
+    stepMutate(s, normRng(rng));
+    return s;
+  };
+
+  // 設定から戦闘を完走させる（不正設定は例外）
+  api.runBattle = function (config, rng) {
+    var errors = api.validateConfig(config);
+    if (errors.length > 0) throw new Error(errors.join('；'));
+    var r = normRng(rng);
+    var s = api.rollInitiative(api.createBattleState(config), r);
+    while (!s.finished) stepMutate(s, r);
+    return s;
+  };
+
+  // ---- エクスポート --------------------------------------------------
+  if (typeof window !== 'undefined') {
+    window.GameEngine = api;
+  }
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  }
+  return api;
+})();
+</script>
+
+<script>
+/* UI 層：GameEngine の呼び出しと DOM 描画だけを担う（エンジン側は DOM に触れない） */
+(function () {
+  'use strict';
+  var E = window.GameEngine;
+
+  function $(id) { return document.getElementById(id); }
+
+  // 設定フィールド定義（入力欄の生成と入力値の読み取りに使う）
+  var FIELDS = [
+    { key: 'count',   label: '人数',     min: 1,    max: 99 },
+    { key: 'hp',      label: 'HP',      min: 1,    max: 9999 },
+    { key: 'attack',  label: '攻击',    min: 0,    max: 99 },
+    { key: 'agility', label: '敏捷',    min: 0,    max: 99 },
+    { key: 'dmgMin',  label: '伤害下限', min: 0,    max: 9999 },
+    { key: 'dmgMax',  label: '伤害上限', min: 0,    max: 9999 }
+  ];
+  var FACTIONS = ['human', 'zombie'];
+
+  // 両陣営の設定入力欄を組み立てる
+  function buildConfigPanel() {
+    var wrap = $('faction-configs');
+    FACTIONS.forEach(function (f) {
+      var fs = document.createElement('fieldset');
+      fs.className = 'faction ' + f;
+      var legend = document.createElement('legend');
+      legend.textContent = E.FACTION_LABEL[f];
+      fs.appendChild(legend);
+      FIELDS.forEach(function (fd) {
+        var label = document.createElement('label');
+        label.className = 'field';
+        var name = document.createElement('span');
+        name.textContent = fd.label;
+        var input = document.createElement('input');
+        input.type = 'number';
+        input.id = f + '-' + fd.key;
+        input.min = String(fd.min);
+        input.max = String(fd.max);
+        input.step = '1';
+        input.value = String(E.DEFAULT_CONFIG[f][fd.key]);
+        label.appendChild(name);
+        label.appendChild(input);
+        fs.appendChild(label);
+      });
+      wrap.appendChild(fs);
+    });
+  }
+
+  // 入力欄から設定値を集める
+  function readConfig() {
+    var cfg = {};
+    FACTIONS.forEach(function (f) {
+      var c = {};
+      FIELDS.forEach(function (fd) {
+        c[fd.key] = Number($(f + '-' + fd.key).value);
+      });
+      cfg[f] = c;
+    });
+    return cfg;
+  }
+
+  // 設定入力欄の有効／無効を切り替える（開戦後はロック）
+  function setConfigEnabled(enabled) {
+    FACTIONS.forEach(function (f) {
+      FIELDS.forEach(function (fd) {
+        $(f + '-' + fd.key).disabled = !enabled;
+      });
+    });
+    $('btn-start').disabled = !enabled;
+  }
+
+  function renderResult(state) {
+    var title = $('result-title');
+    var body = $('result-text');
+    if (state.winner === 'draw') {
+      title.textContent = '战斗结束：平局';
+      body.textContent = '达到行动步数上限，未分出胜负。';
+    } else {
+      title.textContent = '战斗结束 —— ' + E.FACTION_LABEL[state.winner] + '获胜！';
+      var lines = state.survivors.map(function (m) {
+        return m.name + '：剩余 HP ' + m.hp + '/' + m.maxHp;
+      });
+      body.textContent = lines.length > 0 ? lines.join('\n') : '（无存活角色）';
+    }
+    $('result').hidden = false;
+  }
+
+  function renderLog(log) {
+    var box = $('battle-log');
+    box.innerHTML = '';
+    var frag = document.createDocumentFragment();
+    log.forEach(function (e) {
+      var div = document.createElement('div');
+      div.className = 'log-' + e.type;
+      div.textContent = e.text;
+      frag.appendChild(div);
+    });
+    box.appendChild(frag);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function onStart() {
+    var cfg = readConfig();
+    var errors = E.validateConfig(cfg);
+    if (errors.length > 0) {
+      $('config-error').textContent = '配置有误：' + errors.join('；');
+      return;
+    }
+    $('config-error').textContent = '';
+    setConfigEnabled(false);          // 開戦後は設定をロック
+    $('btn-start').hidden = true;
+    $('btn-reset').hidden = false;
+    var state = E.runBattle(cfg);     // 乱数源は既定の Math.random
+    renderResult(state);
+    renderLog(state.log);
+  }
+
+  function onReset() {
+    $('config-error').textContent = '';
+    $('result-title').textContent = '';
+    $('result-text').textContent = '';
+    $('result').hidden = true;
+    $('battle-log').innerHTML = '';
+    setConfigEnabled(true);
+    $('btn-start').hidden = false;
+    $('btn-reset').hidden = true;
+  }
+
+  buildConfigPanel();
+  $('btn-start').addEventListener('click', onStart);
+  $('btn-reset').addEventListener('click', onReset);
+  $('btn-clear-log').addEventListener('click', function () {
+    $('battle-log').innerHTML = '';
+  });
+})();
+</script>
+</body>
+</html>

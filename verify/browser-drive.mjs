@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SHOT_DIR = join(ROOT, 'verify', 'screenshots');
-const PAGE_URL = 'file:///C:/CS/PY/93.Gm1/index.html';
+const PAGE_URL = 'file:///C:/CS/PY/93.Gm1/src/index.html';
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -2,6 +2,8 @@
 
 功能会沿三条轴持续增加（战斗内容、呈现演出、玩法模式），单文件 index.html 的「管理重量」成为预期瓶颈。决定把代码拆到 `src/`（styles.css / engine.js / ui.js），`index.html` 只留两页骨架与 `<link>` / `<script src>` 引用。玩家侧不变量原样保留：零外部依赖、无构建步骤、`file://` 双击即开（普通 `<script src>` 在 file:// 下可用）；工程不变量原样保留：引擎仍是 `window.GameEngine` 纯函数 + 可注入 RNG，`src/engine.js` 顶部注释块继续作为 GameEngine / GameUI 的 API 文档，「同种子一致」由 `verify/engine.test.mjs` 锁死（引擎提取目标从 index.html 改为 src/engine.js，断言语义一条不减）。代价：不再存在「单文件产物」这一分享形态，对已发布 GitHub 的项目无实际损失。
 
+[2026-09-29 追记] index.html 也归入 `src/`：入口变为 `src/index.html`，站内引用改为同目录相对路径（styles.css / engine.js / ui.js），双击即开与零构建不变；玩家侧唯一可见变化是双击的文件深了一层。
+
 ## Considered Options
 
 - **严格单文件 + 内部分区升级（被否）**：不动约束最省事，但不解决文件重量本身，与本次目标（持续加功能后仍好管理）不符。

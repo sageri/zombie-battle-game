@@ -137,8 +137,8 @@
                   agility, dmgMin, dmgMax, downed,
                   pos } ... ],
     * pos: { row, col }（1 始まりのマス座標。左上が (1,1)）。
-      初期配置前は null。値语义であり、丸ごと置き換えるか、複製時は
-      深コピーする（row/col の原地書き換えはしない。浅いクローンが pos の
+      初期配置前は null。値セマンティクスであり、丸ごと置き換えるか、複製時は
+      深コピーする（row/col を in-place に書き換えない。浅いクローンが pos の
       参照を共有すると「入力 state を破壊しない」不変条件が壊れるため）。
       倒地しても pos は純データとして残る（描画・移動阻害・目標選択の
       いずれにも使われない）。
@@ -295,7 +295,7 @@
   // state の複製。log の各エントリは push 以後に決して書き替えないため、
   // log 配列は浅いコピーで共有する（ステップ実行で毎歩 clone しても
   // ログ長に比例した増幅が起きないようにするため。メンバー等は深い複製）。
-  // pos は値语义（{row,col} の丸ごと置き換えが唯一の更新手段）なので、
+  // pos は値セマンティクス（{row,col} の丸ごと置き換えが唯一の更新手段）なので、
   // 浅いコピーで参照を共有せず必ず複製し直す。
   function cloneState(s) {
     return {
@@ -398,7 +398,7 @@
       var idx = api.randInt(0, pool.length - 1, rng);
       var cell = pool[idx];
       pool.splice(idx, 1);
-      m.pos = { row: cell.row, col: cell.col }; // 値语义: pos は丸ごと置き換える
+      m.pos = { row: cell.row, col: cell.col }; // 値セマンティクス: pos は丸ごと置き換える
     }
   }
 
@@ -575,7 +575,7 @@
     }
     var pick = bestCells[api.randInt(0, bestCells.length - 1, rng)];
     var from = { row: actor.pos.row, col: actor.pos.col };
-    actor.pos = { row: pick.row, col: pick.col }; // 値语义: pos は丸ごと置き換える
+    actor.pos = { row: pick.row, col: pick.col }; // 値セマンティクス: pos は丸ごと置き換える
     s.log.push({
       type: 'action-move',
       text: actor.name + ' 移动：' + cellText(from) + '→' + cellText(pick)

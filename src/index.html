@@ -21,7 +21,15 @@ GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
 <!-- 配置ページ（画面 1/2） -->
 <section id="config-screen">
   <h2>阵营配置</h2>
-  <p class="hint">调整两边的成员人数与属性后点「开战」进入战场页；战斗中配置锁定，点战场页的「重置」可返回本页重新调整。</p>
+  <p class="hint">调整两边的角色人数与属性，选择初始站位后点「开战」进入战场页；战斗中配置锁定，点战场页的「重置」可返回本页重新调整。</p>
+  <div class="field global-field">
+    <label for="config-placement">初始站位</label>
+    <select id="config-placement">
+      <option value="mixed">混合随机</option>
+      <option value="split">阵营分区</option>
+    </select>
+    <span class="field-note">混合随机：全图随机落位；阵营分区：人类居左、丧尸居右，中列空置。</span>
+  </div>
   <div id="faction-configs" class="factions"></div>
   <div id="config-error" class="error"></div>
   <div class="actions">
@@ -42,15 +50,7 @@ GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
   </div>
   <div id="order-strip"></div>
   <div id="battlefield">
-    <div class="side human-side">
-      <div class="side-label human">人类阵营</div>
-      <div class="side-grid" id="human-grid"></div>
-    </div>
-    <div class="vs-mark">VS</div>
-    <div class="side zombie-side">
-      <div class="side-label zombie">丧尸阵营</div>
-      <div class="side-grid" id="zombie-grid"></div>
-    </div>
+    <div id="battle-grid"></div>
   </div>
   <div id="battle-banner" hidden>
     <div id="banner-title"></div>

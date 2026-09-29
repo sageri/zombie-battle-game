@@ -1,28 +1,44 @@
 <!DOCTYPE html>
 <!--
 ======================================================================
- GameEngine API（戦闘エンジン：DOM と完全分離された純関数集合）
+ 丧尸 vs 人类 自动战斗器 —— 单文件游戏（GameEngine / GameUI API 文档）
 ======================================================================
 ■ 形態
-  * エンジン本体は script#game-engine タグ内にあり、window.GameEngine
-    として公開する。DOM・UI には一切依存しない。
+  * 戦闘エンジンは script#game-engine タグ内にあり、window.GameEngine
+    として公開する。DOM・UI・タイマーに一切依存しない純関数集合。
   * state は JSON 化可能なプレーンデータのみで構成する。公開関数は入力を
-    破壊せず新しい state を返す（runBattle は内部で作業コピーを書き換える
-    が、外部から見れば純関数である）。
+    破壊せず新しい state を返す（内部では作業コピーを書き替えるが、外部
+    から見れば純関数である）。log の各エントリ {type,text} は push 以後に
+    決して書き替えないため、連続する state 間で log 配列は浅いコピーとして
+    共有される（エントリ自体を外部から書き替えることは想定しない）。
+  * UI 層はその後の script タグ（id 無し）にあり、window.GameUI として公開
+    する。エンジンの呼び出しと DOM 描画だけを担う。
 
-■ 乱数の注入
-  * d100 / d7 / ダメージのすべてのロールは最終引数 rng（() => [0,1) の乱数）
-    を経由する。省略した場合は Math.random を使う。
+■ 乱数の注入（GameEngine）
+  * d100 / d7 / ダメージ・目標選択のすべてのロールは最終引数 rng
+    （() => [0,1) の乱数）を経由する。省略した場合は Math.random を使う。
   * GameEngine.createRng(seed) で mulberry32 ベースの再現可能な乱数源を
     作れる（テスト・デバッグ用）。
+  * 戦闘の乱数は「1 本の乱数列」を順に消費する。したがって同一の rng を
+    与えた場合、次の 2 経路は最終 state（members / order / rolls / log すべて）
+    の JSON 比較で完全一致する（ADR 0001 の一貫性保証）：
+      (a) GameEngine.runBattle(config, rng)                       （整場一括結算）
+      (b) GameEngine.startBattle(config, rng) の後、
+          GameEngine.stepBattle(state, rng) を終局まで繰り返す     （逐次実行）
+    stepBattle は takeTurn と同一経路（同一の乱数消費・state 遷移）であり、
+    verify/engine.test.mjs の一致性断言で固定される。
 
 ■ Node から利用する（テスト用）
   * index.html から script#game-engine タグの中身を文字列として取り出し、
     例えば vm.runInNewContext(src, { module: { exports: {} } }) のように
-    評価すると、sandbox.module.exports から GameEngine を取得できる。
+    評価すると、module.exports から GameEngine を取得できる。
     （window が無い環境では module.exports 側に公開するため。）
+  * UI 層は同じ要領で残りの script タグを評価すれば window.GameUI が
+    得られる。document は最小スタブでよく、GameUI の公開面は
+    実 DOM 無しで駆動できる（描画の目視検証はブラウザ E2E で行う）。
 
-■ API 一覧
+■ GameEngine API 一覧
+  --- 定数・乱数・設定検査 ---
   GameEngine.MAX_STEPS                  : 無限ループ防止のステップ上限。書き換え可（既定 100000）
   GameEngine.DEFAULT_CONFIG             : 既定設定 { human: {...}, zombie: {...} }
   GameEngine.FACTION_LABEL              : 陣営表示名 { human: '人类阵营', zombie: '丧尸阵营' }
@@ -31,14 +47,73 @@
   GameEngine.rollD(sides, rng?)         : 1..sides の整数
   GameEngine.randInt(min, max, rng?)    : min..max の整数（両端を含む）
   GameEngine.validateConfig(config)     : 設定検査。不備の簡体中文メッセージ配列（空配列なら正当）
+  --- state 生成と先攻決定 ---
   GameEngine.createBattleState(config)  : 初期 state（未ダイス）を返す
   GameEngine.rollInitiative(state, rng?): d100 で先攻順を決定する。同点者はその組だけで
                                           重投を繰り返し（重投点は組内のみで比較し、
                                           組内で順位が分かるまで）、過程をログに残す。
                                           新しい state を返す
+  --- 整場一括結算（従来 API・そのまま維持） ---
   GameEngine.takeTurn(state, rng?)      : 現在の行動者の行動を 1 回実行。新しい state を返す
+                                          （終局済み state を渡した場合は入力をそのまま返す）
   GameEngine.runBattle(config, rng?)    : 設定検査 → state 生成 → 先攻決定 → 行動ループで
                                           完走させ、最終 state を返す（不正設定は例外）
+  --- ステップ実行（逐行動リアルタイム演出用・ADR 0001） ---
+  GameEngine.startBattle(config, rng?)  : 設定検査 → state 生成 → 先攻決定までを行い、
+                                          開始 state を返す（runBattle の前半と同一経路。
+                                          不正設定は例外）
+  GameEngine.stepBattle(state, rng?)    : 行動を 1 つ実行し { state, event } を返す。
+                                          takeTurn と同一の乱数消費・state 遷移で、
+                                          event は演出用の観測データ（下記参照）。
+                                          終局済み state を渡した場合は
+                                          { state: 入力そのもの, event: null }（副作用なし）
+  GameEngine.getInitiativeOrder(state)  : 行動順（state.order）のコピー配列を返す
+  GameEngine.isBattleOver(state)        : 終局判定（state.finished の真偽値）
+  GameEngine.getResult(state)           : 終局スナップショット
+                                          { finished, winner, survivors:[{name,hp,maxHp}] }
+                                          （新しいプレーンオブジェクトを返す）
+
+■ stepBattle の event の形（演出用の観測データ。state 遷移には影響しない）
+  { kind: 'skip',   actor }                     : 倒地者の番。何も起きず順序だけ進む
+  { kind: 'none' }                              : 保険経路（通常発生しない）
+  { kind: 'fail',   actor, target, atkRoll, attack }
+  { kind: 'dodge',  actor, target, atkRoll, attack, dodgeRoll, agility }
+  { kind: 'hit',    actor, target, atkRoll, attack, dodgeRoll, agility,
+                    damage, hpBefore, hpAfter, downed }
+  { kind: 'forced-draw' }                       : MAX_STEPS 到達による強制終了
+  そのステップで終局した場合はさらに finished: true と
+  winner: 'human'|'zombie'|'draw' を付す。
+
+■ UI 層（window.GameUI）とスケジューラ注入
+  演出の待ち時間はすべて注入されたスケジューラを経由する。契約：
+    scheduler.setTimeout(fn, ms) → id : 後で fn を一度だけ呼ぶ
+    scheduler.clearTimeout(id)        : 未実行の fn をキャンセル（同期型は no-op でよい）
+    scheduler.clear()                 : （任意）未実行をすべて破棄
+    scheduler.pump(limit?)            : （任意・テスト用）溜まった fn を先頭から実行
+  * GameUI.createRealtimeScheduler() : window.setTimeout / clearTimeout の
+                                       実時間スケジューラ（既定）
+  * GameUI.createSyncScheduler()     : テスト用のポンプ式同期スケジューラ。
+                                       setTimeout は溜めるだけで実行せず、
+                                       pump(limit) で溜まった分を先頭から
+                                       順に実行する。clear() で未実行を全廃棄
+  * GameUI.useScheduler(sched)       : スケジューラ差し替え（戦闘開始前に呼ぶこと）
+  公開面（DOM 無しで駆動できる）：
+    GameUI.getScreen()                : 'config' | 'battle'
+    GameUI.getMode()                  : 'idle'（未開戦）| 'live'（演出中）| 'done'（終局表示）
+    GameUI.getSpeed() / setSpeed(key) : 'slow' | 'middle' | 'fast'（戦闘中でも切替可）
+    GameUI.startBattle(config, rng?)  : 設定検査 → 開戦 → 戦場画面へ。rng 省略時は
+                                        Math.random。演出中に呼ぶと例外、
+                                        不正設定は例外
+    GameUI.skipToResult()             : 演出中のみ有効。残り全ステップを同時通算し
+                                        その場で終局表示へ移る
+    GameUI.resetToConfig()            : 演出中断 → 配置画面へ（戦場・ログ・横幅を破棄、
+                                        設定入力のロック解除）
+    GameUI.clearLog()                 : ログ表示だけ消す（以後の追記は継続）
+    GameUI.getBattleState()           : 現 state の深いコピー（未開戦は null）
+    GameUI.getLogEntries()            : 表示対象ログ [{type,text}] のコピー
+    GameUI.SPEEDS                     : { slow:   { label: '慢', delay: 1600 },
+                                        middle: { label: '中', delay: 800 },
+                                        fast:   { label: '快', delay: 300 } }
 
 ■ config / state の形
   config = {
@@ -70,7 +145,7 @@
   * { box-sizing: border-box; }
   body {
     font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
-    max-width: 920px;
+    max-width: 980px;
     margin: 0 auto;
     padding: 16px;
     color: #222;
@@ -98,15 +173,99 @@
   button { padding: 6px 20px; font-size: 14px; cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: 0.5; }
   button.small { padding: 1px 10px; font-size: 12px; font-weight: normal; }
-  #result {
-    border: 1px solid #1a7f37;
-    background: #eaf6ee;
-    border-radius: 6px;
-    padding: 6px 14px 10px;
-    margin: 10px 0;
+
+  /* ---- 戦場ページ：操作バー ---------------------------------------- */
+  .battle-bar { display: flex; align-items: center; gap: 8px; margin: 2px 0 10px; flex-wrap: wrap; }
+  .bar-label { font-size: 14px; color: #555; }
+  .bar-gap { flex: 1 1 0; }
+  .speed-btn { padding: 4px 16px; }
+  .speed-btn.active { background: #1a5fb4; border-color: #1a5fb4; color: #fff; }
+
+  /* ---- 順序帯 -------------------------------------------------------- */
+  #order-strip {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 8px; border: 1px solid #ccc; border-radius: 6px;
+    background: #fff; min-height: 56px;
   }
-  #result-title { margin: 4px 0; }
-  #result-text { white-space: pre-line; margin: 2px 0; font-family: inherit; font-size: 14px; }
+  .chip {
+    width: 62px; text-align: center;
+    border: 1px solid #ddd; border-radius: 6px; background: #fff;
+    padding: 4px 2px 2px; position: relative;
+    transition: transform .15s ease, border-color .15s ease,
+                background .15s ease, opacity .2s ease;
+  }
+  .chip-emoji { font-size: 20px; line-height: 1.2; }
+  .chip-name { font-size: 11px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip.active {
+    transform: scale(1.18);
+    border-color: #e8a33d; background: #fff7e0;
+    box-shadow: 0 0 8px rgba(232, 163, 61, .75);
+    z-index: 2;
+  }
+  .chip.downed { opacity: .45; filter: grayscale(1); }
+
+  /* ---- 戦場（左右対峙の折り返しグリッド） ---------------------------- */
+  #battlefield { display: flex; gap: 12px; align-items: flex-start; margin: 26px 0 14px; }
+  .side { flex: 1 1 0; min-width: 0; }
+  .side-label { font-weight: bold; font-size: 14px; margin-bottom: 8px; }
+  .side-label.human { color: #1a5fb4; }
+  .side-label.zombie { color: #a51d2d; text-align: right; }
+  .side-grid { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
+  .zombie-side .side-grid { justify-content: flex-end; }
+  .vs-mark { align-self: center; font-weight: bold; color: #bbb; font-size: 15px; flex: 0 0 auto; }
+
+  /* ---- キャラカード（Emoji + 名前 + 血条） --------------------------- */
+  .unit-card {
+    width: 86px;
+    border: 1px solid #ccc; border-radius: 6px; background: #fff;
+    padding: 8px 4px 6px; text-align: center; position: relative;
+    transition: opacity .2s ease, border-color .2s ease, box-shadow .2s ease;
+  }
+  .unit-card.human { border-top: 3px solid #1a5fb4; }
+  .unit-card.zombie { border-top: 3px solid #a51d2d; }
+  .unit-card.current { border-color: #e8a33d; box-shadow: 0 0 6px rgba(232, 163, 61, .8); }
+  .unit-card.downed { opacity: .45; filter: grayscale(1); }
+  .unit-emoji { font-size: 26px; line-height: 1.2; }
+  .unit-name { font-size: 12px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hp-bar { height: 8px; background: #e5e5e5; border-radius: 4px; overflow: hidden; margin-top: 5px; }
+  .hp-fill { height: 100%; width: 100%; background: #3fa34d; border-radius: 4px; transition: width .45s ease; }
+  .hp-num { font-size: 11px; color: #666; margin-top: 2px; font-family: Consolas, monospace; }
+
+  /* ---- 飘字（カード頭上に浮かんで消える） ---------------------------- */
+  .float-layer { position: absolute; left: 0; right: 0; top: -10px; height: 0; pointer-events: none; z-index: 5; }
+  .float-text {
+    position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+    white-space: nowrap; font-weight: bold; font-size: 13px;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff;
+    animation: float-up .9s ease-out forwards;
+  }
+  .float-info { color: #333; }
+  .float-damage { color: #c01c28; font-size: 15px; }
+  @keyframes float-up {
+    from { opacity: 1; transform: translate(-50%, 0); }
+    to   { opacity: 0; transform: translate(-50%, -34px); }
+  }
+
+  /* ---- 被弾ライトアニメ（赤フラッシュ + 揺れ） ------------------------ */
+  .unit-card.hit-flash { animation: hit-flash .5s ease; }
+  @keyframes hit-flash {
+    0%   { background: #fff; }
+    25%  { background: #ffd2d2; transform: translateX(-3px); }
+    50%  { background: #ffb3b3; transform: translateX(3px); }
+    75%  { background: #ffd2d2; transform: translateX(-2px); }
+    100% { background: #fff; transform: none; }
+  }
+
+  /* ---- 終局バナー ---------------------------------------------------- */
+  #battle-banner {
+    border: 2px solid #1a7f37; background: #eaf6ee; border-radius: 6px;
+    padding: 10px 16px; margin: 12px 0; text-align: center;
+  }
+  #battle-banner.draw { border-color: #b26a00; background: #fff7e0; }
+  #banner-title { font-size: 18px; font-weight: bold; margin: 2px 0; }
+  .banner-body { white-space: pre-line; margin: 2px 0; font-size: 14px; font-family: inherit; }
+
+  /* ---- 戦闘ログ ------------------------------------------------------ */
   .log {
     font-family: Consolas, "Courier New", monospace;
     font-size: 13px;
@@ -130,23 +289,44 @@
 <body>
 <h1>丧尸 vs 人类 自动战斗器</h1>
 
-<section id="config-section">
+<!-- 配置ページ（画面 1/2） -->
+<section id="config-screen">
   <h2>阵营配置</h2>
-  <p class="hint">调整两边的成员人数与属性后点「开战」；开战后配置锁定，点「重置」可重新调整。</p>
+  <p class="hint">调整两边的成员人数与属性后点「开战」进入战场页；战斗中配置锁定，点战场页的「重置」可返回本页重新调整。</p>
   <div id="faction-configs" class="factions"></div>
   <div id="config-error" class="error"></div>
   <div class="actions">
     <button id="btn-start">开战</button>
-    <button id="btn-reset" hidden>重置</button>
   </div>
 </section>
 
-<section id="result" hidden>
-  <h2 id="result-title"></h2>
-  <pre id="result-text"></pre>
-</section>
-
-<section id="log-section">
+<!-- 戦場ページ（画面 2/2） -->
+<section id="battle-screen" hidden>
+  <div class="battle-bar">
+    <span class="bar-label">速度：</span>
+    <button id="speed-slow" class="speed-btn">慢</button>
+    <button id="speed-middle" class="speed-btn">中</button>
+    <button id="speed-fast" class="speed-btn">快</button>
+    <span class="bar-gap"></span>
+    <button id="btn-skip">跳到结果</button>
+    <button id="btn-reset">重置</button>
+  </div>
+  <div id="order-strip"></div>
+  <div id="battlefield">
+    <div class="side human-side">
+      <div class="side-label human">人类阵营</div>
+      <div class="side-grid" id="human-grid"></div>
+    </div>
+    <div class="vs-mark">VS</div>
+    <div class="side zombie-side">
+      <div class="side-label zombie">丧尸阵营</div>
+      <div class="side-grid" id="zombie-grid"></div>
+    </div>
+  </div>
+  <div id="battle-banner" hidden>
+    <div id="banner-title"></div>
+    <div id="banner-body" class="banner-body"></div>
+  </div>
   <h2>战斗日志 <button id="btn-clear-log" class="small">清空日志</button></h2>
   <div id="battle-log" class="log"></div>
 </section>
@@ -268,6 +448,24 @@
     return JSON.parse(JSON.stringify(obj));
   }
 
+  // state の複製。log の各エントリは push 以後に決して書き替えないため、
+  // log 配列は浅いコピーで共有する（ステップ実行で毎歩 clone しても
+  // ログ長に比例した増幅が起きないようにするため。メンバー等は深い複製）。
+  function cloneState(s) {
+    return {
+      members: s.members.map(function (m) { return Object.assign({}, m); }),
+      order: s.order.slice(),
+      rolls: clone(s.rolls),
+      turnIndex: s.turnIndex,
+      round: s.round,
+      steps: s.steps,
+      finished: s.finished,
+      winner: s.winner,
+      survivors: s.survivors.map(function (m) { return Object.assign({}, m); }),
+      log: s.log.slice()
+    };
+  }
+
   // 初期 state を生成する（config は書き換えない）
   api.createBattleState = function (config) {
     var members = [];
@@ -304,7 +502,7 @@
   }
 
   api.rollInitiative = function (state, rng) {
-    var s = clone(state);
+    var s = cloneState(state);
     var r = normRng(rng);
     var i;
     // メンバー名 → ダイス履歴 [第1投, 重投1, ...]（末尾が現在の有効値）
@@ -414,19 +612,24 @@
     return true;
   }
 
-  // 現在の行動者の 1 行動を実行する（s を直接書き換える内部用関数）
-  function stepMutate(s, rng) {
+  // 現在の行動者の 1 行動を実行する（s を直接書き換える内部用関数）。
+  // ev を渡した場合は演出用の観測データ（event）をここに記録する。
+  // ev は state 遷移・乱数消費に一切影響しない。
+  function stepMutate(s, rng, ev) {
     s.steps++;
     if (s.steps > api.MAX_STEPS) {
       s.finished = true;
       s.winner = 'draw';
       s.survivors = [];
       s.log.push({ type: 'victory', text: '已达 ' + api.MAX_STEPS + ' 步行动上限，强制结束：平局。' });
+      if (ev) ev.kind = 'forced-draw';
       return;
     }
-    var actor = findMember(s, s.order[s.turnIndex]);
+    var actorName = s.order[s.turnIndex];
+    var actor = findMember(s, actorName);
     // 倒地している場合は何もせずスキップ（ログには残さない）
     if (!actor || actor.downed) {
+      if (ev) { ev.kind = 'skip'; ev.actor = actorName; }
       advanceTurn(s);
       return;
     }
@@ -437,6 +640,7 @@
     });
     if (targets.length === 0) {
       // 通常起こらない（直前の行動後に終了判定済み）。保険として終了判定だけ行う。
+      if (ev) ev.kind = 'none';
       checkBattleEnd(s);
       return;
     }
@@ -450,6 +654,11 @@
         type: 'action-fail',
         text: head + '攻击检定 d7=' + atkRoll + ' ＞ 攻击' + actor.attack + '，攻击失败'
       });
+      if (ev) {
+        ev.kind = 'fail';
+        ev.actor = actor.name; ev.target = target.name;
+        ev.atkRoll = atkRoll; ev.attack = actor.attack;
+      }
       advanceTurn(s);
       return;
     }
@@ -462,12 +671,19 @@
         text: head + '攻击检定 d7=' + atkRoll + ' ≤ 攻击' + actor.attack
             + '，命中；闪避检定 d7=' + dodgeRoll + ' ≤ 敏捷' + target.agility + '，闪避成功'
       });
+      if (ev) {
+        ev.kind = 'dodge';
+        ev.actor = actor.name; ev.target = target.name;
+        ev.atkRoll = atkRoll; ev.attack = actor.attack;
+        ev.dodgeRoll = dodgeRoll; ev.agility = target.agility;
+      }
       advanceTurn(s);
       return;
     }
 
     // 3) ダメージ：自身の区間内の整数乱数
     var dmg = api.randInt(actor.dmgMin, actor.dmgMax, rng);
+    var hpBefore = target.hp;
     target.hp = Math.max(0, target.hp - dmg);
     var text = head + '攻击检定 d7=' + atkRoll + ' ≤ 攻击' + actor.attack
              + '，命中；闪避检定 d7=' + dodgeRoll + ' ＞ 敏捷' + target.agility
@@ -477,6 +693,14 @@
       text += '，倒地！';
     }
     s.log.push({ type: 'action-hit', text: text });
+    if (ev) {
+      ev.kind = 'hit';
+      ev.actor = actor.name; ev.target = target.name;
+      ev.atkRoll = atkRoll; ev.attack = actor.attack;
+      ev.dodgeRoll = dodgeRoll; ev.agility = target.agility;
+      ev.damage = dmg; ev.hpBefore = hpBefore; ev.hpAfter = target.hp;
+      ev.downed = target.downed;
+    }
 
     // 行動後に行終了判定（終わっていなければ次のターンへ）
     if (!checkBattleEnd(s)) {
@@ -487,8 +711,8 @@
   // 公開版：入力 state を破壊せず、新しい state を返す
   api.takeTurn = function (state, rng) {
     if (state.finished) return state;
-    var s = clone(state);
-    stepMutate(s, normRng(rng));
+    var s = cloneState(state);
+    stepMutate(s, normRng(rng), null);
     return s;
   };
 
@@ -500,6 +724,54 @@
     var s = api.rollInitiative(api.createBattleState(config), r);
     while (!s.finished) stepMutate(s, r);
     return s;
+  };
+
+  // ---- ステップ実行 API（逐行動リアルタイム演出用・ADR 0001） --------
+  // runBattle / takeTurn と同一の内部経路を使うため、同一 rng なら
+  // 逐次実行と整場一括結算の結果は完全一致する（先頭コメント塊参照）。
+
+  // 設定検査 → 初期 state 生成 → 先攻決定 までを行い、開始 state を返す。
+  // runBattle の前半と完全に同じ経路（不正設定は例外）。
+  api.startBattle = function (config, rng) {
+    var errors = api.validateConfig(config);
+    if (errors.length > 0) throw new Error(errors.join('；'));
+    return api.rollInitiative(api.createBattleState(config), normRng(rng));
+  };
+
+  // ステップ実行版 takeTurn：1 行動を実行し { state, event } を返す。
+  // takeTurn と同一の乱数消費・state 遷移。event は観測専用。
+  // 終局済み state を渡した場合は何もせず { state: 入力, event: null } を返す。
+  api.stepBattle = function (state, rng) {
+    if (state.finished) return { state: state, event: null };
+    var s = cloneState(state);
+    var ev = {};
+    stepMutate(s, normRng(rng), ev);
+    if (s.finished) {
+      ev.finished = true;
+      ev.winner = s.winner;
+    }
+    return { state: s, event: ev };
+  };
+
+  // 行動順のコピーを返す（外部に state.order の生参照を見せないための補助）
+  api.getInitiativeOrder = function (state) {
+    return state.order.slice();
+  };
+
+  // 終局判定（真偽値化しただけの補助）
+  api.isBattleOver = function (state) {
+    return !!state.finished;
+  };
+
+  // 終局スナップショット：新しいプレーンオブジェクトを返す
+  api.getResult = function (state) {
+    return {
+      finished: !!state.finished,
+      winner: state.winner || null,
+      survivors: (state.survivors || []).map(function (m) {
+        return { name: m.name, hp: m.hp, maxHp: m.maxHp };
+      })
+    };
   };
 
   // ---- エクスポート --------------------------------------------------
@@ -514,12 +786,20 @@
 </script>
 
 <script>
-/* UI 層：GameEngine の呼び出しと DOM 描画だけを担う（エンジン側は DOM に触れない） */
+/* =====================================================================
+ * UI 層：GameEngine の呼び出しと DOM 描画だけを担う（エンジン側は
+ * DOM に触れない）。演出の待ち時間はすべて注入されたスケジューラを
+ * 経由する（既定は実時間、テストは GameUI.createSyncScheduler() で
+ * ポンプ式同期スケジューラに差し替える）。
+ * テスト用の公開面（GameUI）はファイル先頭のコメント塊を参照。
+ * ===================================================================== */
 (function () {
   'use strict';
   var E = window.GameEngine;
 
   function $(id) { return document.getElementById(id); }
+
+  // ---- 定数 ----------------------------------------------------------
 
   // 設定フィールド定義（入力欄の生成と入力値の読み取りに使う）
   var FIELDS = [
@@ -531,6 +811,99 @@
     { key: 'dmgMax',  label: '伤害上限', min: 0,    max: 9999 }
   ];
   var FACTIONS = ['human', 'zombie'];
+
+  // Emoji 美術（人類 / 丧尸 / 倒地 / 勝者）
+  var UNIT_EMOJI = { human: '🧑', zombie: '🧟' };
+  var DOWNED_EMOJI = '💀';
+  var WIN_EMOJI = '🏆';
+
+  // 速度 3 段階（1 ステップあたりの演出待ち時間 ms）
+  var SPEEDS = {
+    slow:   { label: '慢', delay: 1600 },
+    middle: { label: '中', delay: 800 },
+    fast:   { label: '快', delay: 300 }
+  };
+  var SPEED_ORDER = ['slow', 'middle', 'fast'];
+
+  // ---- スケジューラ --------------------------------------------------
+  // 既定: 実時間。テストは createSyncScheduler()（ポンプ式）へ差し替える。
+  function createRealtimeScheduler() {
+    return {
+      setTimeout: function (fn, ms) { return window.setTimeout(fn, ms); },
+      clearTimeout: function (id) { window.clearTimeout(id); }
+    };
+  }
+  // 同期スケジューラ: setTimeout は溜めるだけで実行しない。pump(limit) で
+  // 溜まった分を先頭から実行する（再帰でなくループなので長い戦闘でも安全）。
+  // setTimeout は取り消し可能なトークンを返し、clearTimeout(id) でキューから
+  // 抜ける（速度切替時の張り直しが同期型でも正しく機能するように）。
+  function createSyncScheduler() {
+    var queue = [];
+    return {
+      setTimeout: function (fn) {
+        var token = { fn: fn };
+        queue.push(token);
+        return token;
+      },
+      clearTimeout: function (id) {
+        var idx = queue.indexOf(id);
+        if (idx >= 0) queue.splice(idx, 1);
+      },
+      pump: function (limit) {
+        var n = 0;
+        limit = (typeof limit === 'number') ? limit : Infinity;
+        while (queue.length > 0 && n < limit) {
+          var token = queue.shift();
+          n++;
+          token.fn();
+        }
+        return n;
+      },
+      clear: function () { var n = queue.length; queue.length = 0; return n; },
+      size: function () { return queue.length; }
+    };
+  }
+  var scheduler = createRealtimeScheduler();
+
+  // ---- UI 状態 -------------------------------------------------------
+  var screen = 'config';    // 'config' | 'battle'
+  var mode = 'idle';        // idle: 未開戦 / live: 演出中 / done: 終局表示中
+  var speedKey = 'middle';
+  var state = null;         // 現在のエンジン state（未開戦は null）
+  var rng = null;           // null なら Math.random（エンジン既定）
+  var battleGen = 0;        // 戦闘ごとの代号（開戦/リセットで++、过期回调の無効化）
+  var pendingTimer = null;  // 予約済みの次ステップ
+  var renderedLogCount = 0; // 画面に描画済みの log 先頭数（追記描画用）
+  var cardRefs = {};        // 名前 → { card, emoji, fill, hpText, float }
+  var chipRefs = {};        // 名前 → { chip, emoji }
+
+  // ---- 小道具 --------------------------------------------------------
+
+  function setConfigEnabled(enabled) {
+    FACTIONS.forEach(function (f) {
+      FIELDS.forEach(function (fd) {
+        $(f + '-' + fd.key).disabled = !enabled;
+      });
+    });
+    $('btn-start').disabled = !enabled;
+  }
+
+  function showScreen(name) {
+    screen = name;
+    $('config-screen').hidden = name !== 'config';
+    $('battle-screen').hidden = name !== 'battle';
+  }
+
+  // 名前から現在 state のメンバーを探す
+  function memberByName(name) {
+    if (!state) return null;
+    for (var i = 0; i < state.members.length; i++) {
+      if (state.members[i].name === name) return state.members[i];
+    }
+    return null;
+  }
+
+  // ---- 設定パネル ----------------------------------------------------
 
   // 両陣営の設定入力欄を組み立てる
   function buildConfigPanel() {
@@ -574,45 +947,337 @@
     return cfg;
   }
 
-  // 設定入力欄の有効／無効を切り替える（開戦後はロック）
-  function setConfigEnabled(enabled) {
-    FACTIONS.forEach(function (f) {
-      FIELDS.forEach(function (fd) {
-        $(f + '-' + fd.key).disabled = !enabled;
-      });
-    });
-    $('btn-start').disabled = !enabled;
-  }
+  // ---- 戦場の描画 ----------------------------------------------------
 
-  function renderResult(state) {
-    var title = $('result-title');
-    var body = $('result-text');
-    if (state.winner === 'draw') {
-      title.textContent = '战斗结束：平局';
-      body.textContent = '达到行动步数上限，未分出胜负。';
-    } else {
-      title.textContent = '战斗结束 —— ' + E.FACTION_LABEL[state.winner] + '获胜！';
-      var lines = state.survivors.map(function (m) {
-        return m.name + '：剩余 HP ' + m.hp + '/' + m.maxHp;
-      });
-      body.textContent = lines.length > 0 ? lines.join('\n') : '（无存活角色）';
+  // キャラカードを一度だけ組み立てる（以後は updateCards で差し替え）
+  function buildCards() {
+    cardRefs = {};
+    var grids = { human: $('human-grid'), zombie: $('zombie-grid') };
+    grids.human.innerHTML = '';
+    grids.zombie.innerHTML = '';
+    for (var i = 0; i < state.members.length; i++) {
+      var m = state.members[i];
+      var card = document.createElement('div');
+      card.className = 'unit-card ' + m.faction;
+      card.id = 'card-' + m.name;
+      var emoji = document.createElement('div');
+      emoji.className = 'unit-emoji';
+      var name = document.createElement('div');
+      name.className = 'unit-name';
+      name.textContent = m.name;
+      var bar = document.createElement('div');
+      bar.className = 'hp-bar';
+      var fill = document.createElement('div');
+      fill.className = 'hp-fill';
+      bar.appendChild(fill);
+      var hpText = document.createElement('div');
+      hpText.className = 'hp-num';
+      var floatLayer = document.createElement('div');
+      floatLayer.className = 'float-layer';
+      card.appendChild(emoji);
+      card.appendChild(name);
+      card.appendChild(bar);
+      card.appendChild(hpText);
+      card.appendChild(floatLayer);
+      grids[m.faction].appendChild(card);
+      cardRefs[m.name] = { card: card, emoji: emoji, fill: fill, hpText: hpText, float: floatLayer };
     }
-    $('result').hidden = false;
+    updateCards();
   }
 
-  function renderLog(log) {
+  // 現在 state に合わせてカード（Emoji・血条・倒地状態）を更新する
+  function updateCards() {
+    if (!state) return;
+    for (var i = 0; i < state.members.length; i++) {
+      var m = state.members[i];
+      var r = cardRefs[m.name];
+      if (!r) continue;
+      r.emoji.textContent = m.downed ? DOWNED_EMOJI : UNIT_EMOJI[m.faction];
+      r.hpText.textContent = m.hp + '/' + m.maxHp;
+      var pct = Math.max(0, Math.min(100, (m.hp / m.maxHp) * 100));
+      r.fill.style.width = pct + '%';
+      if (m.downed) r.card.classList.add('downed');
+      else r.card.classList.remove('downed');
+    }
+  }
+
+  // 順序帯のチップを一度だけ組み立てる
+  function buildStrip() {
+    chipRefs = {};
+    var strip = $('order-strip');
+    strip.innerHTML = '';
+    for (var i = 0; i < state.order.length; i++) {
+      var name = state.order[i];
+      var chip = document.createElement('div');
+      chip.className = 'chip';
+      chip.id = 'chip-' + name;
+      var emoji = document.createElement('div');
+      emoji.className = 'chip-emoji';
+      var nm = document.createElement('div');
+      nm.className = 'chip-name';
+      nm.textContent = name;
+      chip.appendChild(emoji);
+      chip.appendChild(nm);
+      strip.appendChild(chip);
+      chipRefs[name] = { chip: chip, emoji: emoji };
+    }
+  }
+
+  // 順序帯を更新する（activeName: 現在の行動者。null なら強調なし）
+  function updateStrip(activeName) {
+    if (!state) return;
+    for (var i = 0; i < state.order.length; i++) {
+      var name = state.order[i];
+      var r = chipRefs[name];
+      if (!r) continue;
+      var m = memberByName(name);
+      if (!m) continue;
+      r.emoji.textContent = m.downed ? DOWNED_EMOJI : UNIT_EMOJI[m.faction];
+      if (m.downed) r.chip.classList.add('downed');
+      else r.chip.classList.remove('downed');
+      if (name === activeName && !state.finished) r.chip.classList.add('active');
+      else r.chip.classList.remove('active');
+    }
+  }
+
+  // 現在の行動者を戦場カードの橙色枠でも示す（順序帯強調の同源マーカー）
+  function setCurrentMarker(name) {
+    for (var key in cardRefs) {
+      if (Object.prototype.hasOwnProperty.call(cardRefs, key)) {
+        var r = cardRefs[key];
+        if (key === name) r.card.classList.add('current');
+        else r.card.classList.remove('current');
+      }
+    }
+  }
+
+  // すべての飘字レイヤーを空にする（各ステップの描画前に呼ぶ。
+  // 計時器で個別削除せず、次のステップで置き換える方式）
+  function clearFloats() {
+    for (var key in cardRefs) {
+      if (Object.prototype.hasOwnProperty.call(cardRefs, key)) {
+        cardRefs[key].float.innerHTML = '';
+      }
+    }
+  }
+
+  // 名前のカード頭上に飘字を追加する
+  function floatOn(name, text, cls) {
+    var r = cardRefs[name];
+    if (!r) return;
+    var span = document.createElement('span');
+    span.className = 'float-text ' + cls;
+    span.textContent = text;
+    r.float.appendChild(span);
+  }
+
+  // 被弾カードに赤フラッシュ + 揺れのアニメをかける（再始動のため強制リフロー）
+  function flashCard(name) {
+    var r = cardRefs[name];
+    if (!r) return;
+    r.card.classList.remove('hit-flash');
+    void r.card.offsetWidth;
+    r.card.classList.add('hit-flash');
+  }
+
+  // ---- 戦闘ログ ------------------------------------------------------
+
+  // まだ描画していないログ行だけを追記し、最下部へ自動スクロールする
+  function appendLog() {
+    if (!state || renderedLogCount >= state.log.length) return;
     var box = $('battle-log');
-    box.innerHTML = '';
     var frag = document.createDocumentFragment();
-    log.forEach(function (e) {
+    for (var i = renderedLogCount; i < state.log.length; i++) {
+      var e = state.log[i];
       var div = document.createElement('div');
       div.className = 'log-' + e.type;
       div.textContent = e.text;
       frag.appendChild(div);
-    });
+    }
+    renderedLogCount = state.log.length;
     box.appendChild(frag);
     box.scrollTop = box.scrollHeight;
   }
+
+  // 一键清空：表示だけ消す。演出中なら以後の行動ログをそのまま追記し続ける
+  function clearLog() {
+    $('battle-log').innerHTML = '';
+    renderedLogCount = state ? state.log.length : 0;
+  }
+
+  // ---- 終局バナー ----------------------------------------------------
+
+  function renderBanner() {
+    var snap = E.getResult(state);
+    var title = $('banner-title');
+    var body = $('banner-body');
+    var banner = $('battle-banner');
+    if (snap.winner === 'draw') {
+      banner.className = 'draw';
+      title.textContent = WIN_EMOJI + ' 战斗结束：平局';
+      body.textContent = '达到行动步数上限，未分出胜负。';
+    } else {
+      banner.className = '';
+      title.textContent = WIN_EMOJI + ' 战斗结束 —— ' + E.FACTION_LABEL[snap.winner] + '获胜！';
+      var lines = snap.survivors.map(function (m) {
+        return m.name + '：剩余 HP ' + m.hp + '/' + m.maxHp;
+      });
+      body.textContent = lines.length > 0 ? lines.join('\n') : '（无存活角色）';
+    }
+    banner.hidden = false;
+  }
+
+  // ---- スケジューリング ----------------------------------------------
+
+  // 次ステップを予約する（gen で过期回调を無効化）
+  function scheduleNext(delay) {
+    var gen = battleGen;
+    pendingTimer = scheduler.setTimeout(function () {
+      pendingTimer = null;
+      if (gen === battleGen && mode === 'live') doStep();
+    }, delay);
+  }
+
+  // 予約済みの次ステップを取り消す（実時間: clearTimeout / 同期: clear）
+  function cancelPending() {
+    if (pendingTimer !== null) {
+      if (typeof scheduler.clearTimeout === 'function') scheduler.clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+    if (typeof scheduler.clear === 'function') scheduler.clear();
+  }
+
+  // ---- 演出ループ ----------------------------------------------------
+
+  // 1 ステップ = エンジンの 1 行動をその場で結算し、その結果を演出する
+  function doStep() {
+    if (mode !== 'live' || !state) return;
+    var res = E.stepBattle(state, rng);
+    state = res.state;
+    if (!res.event) {
+      // 終局済み state を踏んだ場合の保険（通常到達しない）
+      finishBattle();
+      return;
+    }
+    applyEvent(res.event);
+    if (state.finished) {
+      finishBattle();
+    } else {
+      scheduleNext(SPEEDS[speedKey].delay);
+    }
+  }
+
+  // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・ログ）
+  function applyEvent(ev) {
+    clearFloats();
+    updateCards();
+    var activeName = ev.actor || null;
+    updateStrip(activeName);
+    setCurrentMarker(activeName);
+    if (ev.kind === 'fail') {
+      floatOn(ev.actor, 'd7=' + ev.atkRoll + ' 攻击失手', 'float-info');
+    } else if (ev.kind === 'dodge') {
+      floatOn(ev.target, 'd7=' + ev.dodgeRoll + ' 闪避成功', 'float-info');
+    } else if (ev.kind === 'hit') {
+      floatOn(ev.actor, 'd7=' + ev.atkRoll + ' 命中', 'float-info');
+      floatOn(ev.target, '-' + ev.damage + (ev.downed ? ' 倒地' : ''), 'float-damage');
+      flashCard(ev.target);
+    }
+    appendLog();
+  }
+
+  // 終局表示へ移る（順序帯の強調を外し、横幅を出す）
+  function finishBattle() {
+    mode = 'done';
+    pendingTimer = null;
+    updateCards();
+    updateStrip(null);
+    setCurrentMarker(null);
+    clearFloats();
+    $('btn-skip').disabled = true;
+    appendLog();
+    renderBanner();
+  }
+
+  // ---- 公開操作 ------------------------------------------------------
+
+  // 開戦：検査 → エンジンで開始 state 生成 → 戦場画面へ → 最初のステップを予約
+  function startBattle(config, rngOpt) {
+    if (mode === 'live') throw new Error('演出进行中，请先重置再开战');
+    var errors = E.validateConfig(config);
+    if (errors.length > 0) throw new Error(errors.join('；'));
+    cancelPending();
+    battleGen++;
+    rng = (typeof rngOpt === 'function') ? rngOpt : null;
+    state = E.startBattle(config, rng);   // rng null → エンジン既定の Math.random
+    setConfigEnabled(false);              // 開戦後は配置をロック（画面遷移と二重の保険）
+    renderedLogCount = 0;
+    $('battle-log').innerHTML = '';
+    $('battle-banner').hidden = true;
+    $('btn-skip').disabled = false;
+    buildCards();
+    buildStrip();
+    showScreen('battle');
+    mode = 'live';
+    appendLog();
+    // 開戦直後は 1 拍置いてから最初の行動へ（阵容と順序帯を一望させる）
+    var firstName = state.order[state.turnIndex];
+    updateStrip(firstName);
+    setCurrentMarker(firstName);
+    scheduleNext(SPEEDS[speedKey].delay);
+  }
+
+  // 跳到结果：残り全ステップを同時通算して終局へ（同一乱数列なので
+  // そのまま見続けた場合と完全に同じ終局になる）
+  function skipToResult() {
+    if (mode !== 'live' || !state) return;
+    cancelPending();
+    battleGen++;
+    while (!state.finished) {
+      var res = E.stepBattle(state, rng);
+      state = res.state;
+    }
+    finishBattle();
+  }
+
+  // リセット：演出中断 → 配置画面へ（上一戦の战场・日志・横幅を破棄）
+  function resetToConfig() {
+    cancelPending();
+    battleGen++;
+    mode = 'idle';
+    state = null;
+    rng = null;
+    renderedLogCount = 0;
+    cardRefs = {};
+    chipRefs = {};
+    $('human-grid').innerHTML = '';
+    $('zombie-grid').innerHTML = '';
+    $('order-strip').innerHTML = '';
+    $('battle-log').innerHTML = '';
+    $('battle-banner').hidden = true;
+    $('banner-title').textContent = '';
+    $('banner-body').textContent = '';
+    $('config-error').textContent = '';
+    setConfigEnabled(true);
+    showScreen('config');
+  }
+
+  // 速度切替（戦闘中でも可）。予約済みの次ステップは新 delay で張り直す
+  function setSpeed(key) {
+    if (!SPEEDS[key]) return;
+    speedKey = key;
+    for (var i = 0; i < SPEED_ORDER.length; i++) {
+      var k = SPEED_ORDER[i];
+      $('speed-' + k).className = 'speed-btn' + (k === key ? ' active' : '');
+    }
+    if (mode === 'live' && pendingTimer !== null) {
+      if (typeof scheduler.clearTimeout === 'function') scheduler.clearTimeout(pendingTimer);
+      pendingTimer = null;
+      scheduleNext(SPEEDS[speedKey].delay);
+    }
+  }
+
+  // ---- ボタン --------------------------------------------------------
 
   function onStart() {
     var cfg = readConfig();
@@ -622,31 +1287,56 @@
       return;
     }
     $('config-error').textContent = '';
-    setConfigEnabled(false);          // 開戦後は設定をロック
-    $('btn-start').hidden = true;
-    $('btn-reset').hidden = false;
-    var state = E.runBattle(cfg);     // 乱数源は既定の Math.random
-    renderResult(state);
-    renderLog(state.log);
+    try {
+      startBattle(cfg);                 // ロックは startBattle 内で行う
+    } catch (e) {
+      setConfigEnabled(true);
+      $('config-error').textContent = '配置有误：' + (e && e.message ? e.message : String(e));
+    }
   }
 
-  function onReset() {
-    $('config-error').textContent = '';
-    $('result-title').textContent = '';
-    $('result-text').textContent = '';
-    $('result').hidden = true;
-    $('battle-log').innerHTML = '';
-    setConfigEnabled(true);
-    $('btn-start').hidden = false;
-    $('btn-reset').hidden = true;
-  }
+  // ---- 公開 API（window.GameUI） -------------------------------------
+
+  window.GameUI = {
+    SPEEDS: SPEEDS,
+    createRealtimeScheduler: createRealtimeScheduler,
+    createSyncScheduler: createSyncScheduler,
+    useScheduler: function (sched) {
+      if (!sched || typeof sched.setTimeout !== 'function') {
+        throw new Error('调度器必须提供 setTimeout(fn, ms)');
+      }
+      scheduler = sched;
+    },
+    getScheduler: function () { return scheduler; },
+    getScreen: function () { return screen; },
+    getMode: function () { return mode; },
+    getSpeed: function () { return speedKey; },
+    setSpeed: setSpeed,
+    startBattle: startBattle,
+    skipToResult: skipToResult,
+    resetToConfig: resetToConfig,
+    clearLog: clearLog,
+    getBattleState: function () {
+      return state ? JSON.parse(JSON.stringify(state)) : null;
+    },
+    getLogEntries: function () {
+      return state ? state.log.slice() : [];
+    }
+  };
+
+  // ---- 起動 ----------------------------------------------------------
 
   buildConfigPanel();
+  showScreen('config');
+  setSpeed('middle');
+  // 速度 3 段ボタンの配線（実クリックでも GameUI.setSpeed と同じ経路を通る）
+  $('speed-slow').addEventListener('click', function () { setSpeed('slow'); });
+  $('speed-middle').addEventListener('click', function () { setSpeed('middle'); });
+  $('speed-fast').addEventListener('click', function () { setSpeed('fast'); });
   $('btn-start').addEventListener('click', onStart);
-  $('btn-reset').addEventListener('click', onReset);
-  $('btn-clear-log').addEventListener('click', function () {
-    $('battle-log').innerHTML = '';
-  });
+  $('btn-skip').addEventListener('click', skipToResult);
+  $('btn-reset').addEventListener('click', resetToConfig);
+  $('btn-clear-log').addEventListener('click', clearLog);
 })();
 </script>
 </body>

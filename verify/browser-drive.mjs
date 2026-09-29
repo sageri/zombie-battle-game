@@ -1,17 +1,22 @@
 /* =====================================================================
  * verify/browser-drive.mjs
- * Edge を CDP（DevTools Protocol）で直接駆動するゼロ依存 E2E ドライバ。
- * Node 内蔵機能のみ使用（playwright / puppeteer 等は使わない）。
+ * 可視化改版（設定/戦場の 2 画面 + 逐行動リアルタイム演出）を
+ * Edge headless + 生 CDP で黑盒 E2E 実測するゼロ依存ドライバ。
+ * 実マウス / 実キーボードでページの実コントロールを操作する。
  *
  * 使い方:  node verify/browser-drive.mjs
- * 出力:    verify/screenshots/01..05*.png
- *          verify/battle-log-dump.txt   （戦闘ログ全文・UTF-8）
- *          verify/e2e-findings.json     （判定詳細・UTF-8）
+ * 出力:    verify/screenshots/01..05*.png   （本回合の証跡。起動時に旧 png を全消去）
+ *          verify/battle-log-skip-dump.txt  （STEP3「跳到結果」戦のログ全文・UTF-8）
+ *          verify/battle-log-dump.txt       （STEP5 高速自動完走戦のログ全文・UTF-8）
+ *          verify/e2e-findings.json         （判定詳細・UTF-8）
  * 注意:    コンソールは cp932 のため ASCII のみ出力する。
  *          中文の判定テキストはファイルへ書き出して目視確認する。
+ * 撮影補助: 飘字は 0.9 秒でフェードアウトするため、撮影の間だけ CDP の
+ *          Animation.setPlaybackRate で CSS アニメを 0.1 倍速にし、
+ *          撮影後すぐ 1 倍へ戻す。ページの JS / エンジンには触れない。
  * ===================================================================== */
 import { spawn, execSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,12 +27,20 @@ const PAGE_URL = 'file:///C:/CS/PY/93.Gm1/index.html';
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 前回合の旧スクリーンショットを全消去（証跡セットの取り違え防止）
 mkdirSync(SHOT_DIR, { recursive: true });
+for (const f of readdirSync(SHOT_DIR)) {
+  if (f.toLowerCase().endsWith('.png')) {
+    try { unlinkSync(join(SHOT_DIR, f)); } catch { /* ignore */ }
+  }
+}
 
 /* ---- 判定結果の記録（コンソールは ASCII のみ） ---------------------- */
 const steps = [];
+const pageErrors = [];
 function record(id, name, passed, detail) {
-  steps.push({ id, name, passed, detail: detail === undefined ? null : detail });
+  steps.push({ id, name, passed: !!passed, detail: detail === undefined ? null : detail });
   console.log(`[STEP ${id}] ${passed ? 'PASS' : 'FAIL'} ${name}`);
 }
 async function runStep(id, name, fn) {
@@ -181,21 +194,127 @@ async function setNumberInput(cdp, id, value) {
   return got;
 }
 
-async function shotFull(cdp, path) {
-  // ビューポートを文書全体の高さに広げてから撮影する（フルページ相当）
+// CSS アニメの再生速度を変える（撮影用スローモーション。非対応環境では false）
+async function setAnimRate(cdp, rate) {
+  try {
+    await cdp.send('Animation.enable');
+    await cdp.send('Animation.setPlaybackRate', { playbackRate: rate });
+    return true;
+  } catch { return false; }
+}
+
+// ビューポートの高さを文書全体に合わせる（一枚の全文スクリーンショット用）
+async function fitViewport(cdp, pad = 90) {
   const h = await evalJS(cdp, 'Math.max(document.documentElement.scrollHeight, window.innerHeight)');
+  const H = Math.min(Math.max(h + pad, 900), 12000);
   await cdp.send('Emulation.setDeviceMetricsOverride', {
-    width: 1400, height: Math.min(Math.max(h, 600), 12000), deviceScaleFactor: 1, mobile: false
+    width: 1400, height: H, deviceScaleFactor: 1, mobile: false
   });
-  await sleep(280);
+  await sleep(220);
+  return H;
+}
+
+async function shotViewport(cdp, path) {
+  await evalJS(cdp, 'window.scrollTo(0, 0)');
+  await sleep(60);
   const r = await cdp.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(path, Buffer.from(r.data, 'base64'));
-  await cdp.send('Emulation.clearDeviceMetricsOverride');
-  await sleep(150);
   console.log('shot: ' + path);
 }
 
-/* ---- 戦闘ログの解析（仕様との突き合わせ） ---------------------------- */
+async function shotFull(cdp, path) {
+  // ビューポートを文書全体の高さに広げてから撮影する（フルページ相当）
+  await fitViewport(cdp, 40);
+  await shotViewport(cdp, path);
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  await sleep(120);
+}
+
+// ページ側の未捕捉例外を記録する（実測中に throw されたら notes へ出す）
+function watchPageErrors(cdp) {
+  cdp.on('Runtime.exceptionThrown', (p) => {
+    const d = p && p.exceptionDetails;
+    pageErrors.push((d && ((d.exception && d.exception.description) || d.text)) || 'unknown exception');
+  });
+}
+
+/* ---- DOM スナップ式（evalJS に渡す。単一 eval なので読み取りは原子的） -- */
+// 飘字・順序帯強調・ログ末尾・state の位置を 1 回の eval で取る
+const SNAP_EXPR = `(() => {
+  const g = (id) => document.getElementById(id);
+  const floats = [...document.querySelectorAll('.unit-card .float-text')].map((e) => ({
+    card: e.closest('.unit-card') ? e.closest('.unit-card').id : null,
+    text: e.textContent,
+    cls: e.className
+  }));
+  const active = document.querySelector('#order-strip .chip.active');
+  const current = document.querySelector('.unit-card.current');
+  const log = g('battle-log');
+  const st = window.GameUI.getBattleState();
+  return {
+    floats: floats,
+    activeChip: active ? active.id : null,
+    currentCard: current ? current.id : null,
+    logCount: log.children.length,
+    lastLog: log.children.length ? log.children[log.children.length - 1].textContent : null,
+    lastLogs: [...log.children].slice(-3).map((d) => d.textContent),
+    logScroll: { top: log.scrollTop, clientH: log.clientHeight, scrollH: log.scrollHeight },
+    mode: window.GameUI.getMode(),
+    turnIndex: st ? st.turnIndex : null,
+    steps: st ? st.steps : null,
+    order: st ? st.order : null
+  };
+})()`;
+
+// 戦場の構造スナップ（カード / 順序帯 / ログ先頭 / state）
+const STRUCT_EXPR = `(() => {
+  const cards = (sel) => [...document.querySelectorAll(sel)].map((c) => ({
+    id: c.id,
+    name: c.querySelector('.unit-name').textContent,
+    emoji: c.querySelector('.unit-emoji').textContent,
+    hp: c.querySelector('.hp-num').textContent,
+    downed: c.classList.contains('downed')
+  }));
+  const chips = [...document.querySelectorAll('#order-strip .chip')].map((c) => ({
+    id: c.id,
+    name: c.querySelector('.chip-name').textContent,
+    emoji: c.querySelector('.chip-emoji').textContent,
+    active: c.classList.contains('active'),
+    downed: c.classList.contains('downed')
+  }));
+  const log = document.getElementById('battle-log');
+  const st = window.GameUI.getBattleState();
+  return {
+    screen: window.GameUI.getScreen(),
+    mode: window.GameUI.getMode(),
+    speed: window.GameUI.getSpeed(),
+    configHidden: document.getElementById('config-screen').hidden,
+    battleHidden: document.getElementById('battle-screen').hidden,
+    humanCards: cards('#human-grid .unit-card'),
+    zombieCards: cards('#zombie-grid .unit-card'),
+    chips: chips,
+    activeCount: chips.filter((c) => c.active).length,
+    logCount: log.children.length,
+    logLines: [...log.children].map((d) => d.textContent),
+    state: st ? { order: st.order, turnIndex: st.turnIndex, steps: st.steps, rolls: st.rolls, finished: st.finished } : null
+  };
+})()`;
+
+// 飘字の数値が直近ログ行と整合するか（同一 applyEvent 内で原子的に取った組のみ判定）。
+// 行動者が順序末尾の場合、advanceTurn が行動行の後に「第 N 轮」区切り行を
+// 追加するため、直近 3 行のどこかに含まれていれば整合とみなす
+function floatLogAgree(floats, lastLogs) {
+  if (!lastLogs || lastLogs.length === 0) return false;
+  return floats.every((f) => {
+    const dmg = f.text.match(/^-(\d+)/);
+    if (dmg) return lastLogs.some((l) => l.includes('伤害 ' + dmg[1]));
+    const m = f.text.match(/^d7=(\d+)/);
+    if (m) return lastLogs.some((l) => l.includes('d7=' + m[1]));
+    return false;
+  });
+}
+
+/* ---- 戦闘ログの解析（仕様第 5 条との突き合わせ） --------------------- */
 const HUMAN_MAX_HP = 12, ZOMBIE_MAX_HP = 9;
 const HUMAN_DMG = [1, 3], ZOMBIE_DMG = [1, 5];
 const EXPECTED_NAMES = ['玩家1', '玩家2', '玩家3', '丧尸1', '丧尸2', '丧尸3'];
@@ -306,6 +425,34 @@ function parseVictory(line) {
   return { faction: m[1], survivors };
 }
 
+// 行動順が出目履歴の辞書順降順（エンジン cmpRollsDesc と同一規則）になっているか。
+// 同点組の重投点は組内だけで比較され、組と外部の前后は元の点数で確定するため、
+// 「最後の出目」の全体降順ではなく履歴列の辞書順降順で判定する
+function orderSortedOk(ana) {
+  const hist = ana.orderParsed.map((o) => (o ? o.rolls : null));
+  for (const h of hist) {
+    if (!h || h.length === 0 || h.some((r) => r < 1 || r > 100)) return false;
+  }
+  for (let i = 0; i + 1 < hist.length; i++) {
+    const a = hist[i], b = hist[i + 1];
+    const n = Math.min(a.length, b.length);
+    let c = 0;
+    for (; c < n; c++) if (a[c] !== b[c]) break;
+    if (c < n) {
+      if (b[c] > a[c]) return false; // 最初の差異は降順であること
+    } else if (b.length > a.length) {
+      return false; // 保険: 接頭辞が全等なら短い方が後、は規則外
+    }
+  }
+  return true;
+}
+
+// 重投履歴を持つ者は【先攻重投】行に名前があるか
+function rerollConsistent(ana) {
+  const rerollText = ana.rerolls.join('\n');
+  return ana.orderParsed.every((o) => !o || o.rolls.length === 1 || rerollText.includes(o.name));
+}
+
 /* ---- メイン ---------------------------------------------------------- */
 let proc = null;
 let userDataDir = null;
@@ -345,193 +492,356 @@ async function main() {
   const target = await findPageTarget(30000);
   cdp = await connectCdp(target.webSocketDebuggerUrl);
   await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable').catch(() => {});
+  watchPageErrors(cdp);
   const loaded = new Promise((res) => cdp.on('Page.loadEventFired', res));
   await cdp.send('Page.navigate', { url: PAGE_URL });
   await Promise.race([loaded, sleep(10000)]);
   await sleep(600);
 
-  /* -- STEP 1: 既定の設定画面 ---------------------------------------- */
-  await runStep(1, 'config-ui-defaults', async () => {
+  /* -- STEP 1: 既定の設定画面（既定値 + 入力可編集） ------------------ */
+  await runStep(1, 'config-screen-defaults', async () => {
     const c = await evalJS(cdp, `(() => {
       const g = (id) => document.getElementById(id);
       const ids = ['human-count','human-hp','human-attack','human-agility','human-dmgMin','human-dmgMax',
                    'zombie-count','zombie-hp','zombie-attack','zombie-agility','zombie-dmgMin','zombie-dmgMax'];
       const fields = {};
-      for (const id of ids) fields[id] = g(id) ? g(id).value : null;
-      const members = window.GameEngine.createBattleState(window.GameEngine.DEFAULT_CONFIG).members
-        .map((m) => ({ name: m.name, faction: m.faction, hp: m.hp, attack: m.attack, agility: m.agility, dmgMin: m.dmgMin, dmgMax: m.dmgMax }));
+      for (const id of ids) fields[id] = g(id) ? { value: g(id).value, disabled: g(id).disabled } : null;
+      const names = window.GameEngine.createBattleState(window.GameEngine.DEFAULT_CONFIG).members.map((m) => m.name);
       return {
-        fields, members,
-        legends: [...document.querySelectorAll('fieldset.faction legend')].map((l) => l.textContent),
-        inputCount: document.querySelectorAll('#faction-configs input').length,
-        allEnabled: [...document.querySelectorAll('#faction-configs input')].every((i) => !i.disabled),
+        fields, names,
+        screen: window.GameUI.getScreen(),
+        configVisible: !g('config-screen').hidden,
+        battleHidden: g('battle-screen').hidden,
         startVisible: !g('btn-start').hidden && !g('btn-start').disabled,
-        resetHidden: g('btn-reset').hidden,
-        clearBtnExists: !!g('btn-clear-log'),
-        resultHidden: g('result').hidden,
         logEmpty: g('battle-log').children.length === 0,
         title: document.title
       };
     })()`);
     const f = c.fields;
+    const expect = { 'human-count': '1', 'human-hp': '12', 'human-attack': '4', 'human-agility': '4', 'human-dmgMin': '1', 'human-dmgMax': '3',
+                     'zombie-count': '1', 'zombie-hp': '9', 'zombie-attack': '5', 'zombie-agility': '2', 'zombie-dmgMin': '1', 'zombie-dmgMax': '5' };
+    let valuesOk = true, editableOk = true;
+    for (const id of Object.keys(expect)) {
+      if (!f[id] || f[id].value !== expect[id]) valuesOk = false;
+      if (!f[id] || f[id].disabled) editableOk = false;
+    }
     const passed =
-      c.inputCount === 12 && c.allEnabled && c.startVisible && c.resetHidden &&
-      c.clearBtnExists && c.resultHidden && c.logEmpty &&
-      f['human-count'] === '1' && f['zombie-count'] === '1' &&
-      f['human-hp'] === '12' && f['human-attack'] === '4' && f['human-agility'] === '4' &&
-      f['human-dmgMin'] === '1' && f['human-dmgMax'] === '3' &&
-      f['zombie-hp'] === '9' && f['zombie-attack'] === '5' && f['zombie-agility'] === '2' &&
-      f['zombie-dmgMin'] === '1' && f['zombie-dmgMax'] === '5' &&
-      c.members.length === 2 && c.members[0].name === '玩家1' && c.members[1].name === '丧尸1';
+      c.screen === 'config' && c.configVisible && c.battleHidden &&
+      Object.keys(f).length === 12 && valuesOk && editableOk &&
+      c.startVisible && c.logEmpty &&
+      JSON.stringify(c.names) === JSON.stringify(['玩家1', '丧尸1']) &&
+      c.title.includes('丧尸 vs 人类');
     await shotFull(cdp, join(SHOT_DIR, '01-config.png'));
-    return { passed, ...c };
+    return { passed, names: c.names, valuesOk, editableOk, startVisible: c.startVisible, title: c.title };
   });
 
-  /* -- STEP 2: 人数を 3 ずつに増やす（命名自増の確認） ---------------- */
-  await runStep(2, 'count-to-3-naming', async () => {
-    const humanCount = await setNumberInput(cdp, 'human-count', 3);
-    const zombieCount = await setNumberInput(cdp, 'zombie-count', 3);
-    const names3 = await evalJS(cdp, `(() => {
-      const d = window.GameEngine.DEFAULT_CONFIG;
-      const cfg = { human: Object.assign({}, d.human, { count: 3 }), zombie: Object.assign({}, d.zombie, { count: 3 }) };
-      return window.GameEngine.createBattleState(cfg).members.map((m) => m.name);
-    })()`);
-    const expect = JSON.stringify(EXPECTED_NAMES);
-    const passed = humanCount === '3' && zombieCount === '3' && JSON.stringify(names3) === expect;
-    await shotFull(cdp, join(SHOT_DIR, '02-config-3v3.png'));
-    return { passed, humanCount, zombieCount, names3 };
-  });
-
-  /* -- STEP 3: 開戦 → 結果が出るまで待機 → ログ全文を検証 ------------- */
-  let data3 = null;
-  let ana = null;
-  let replay = null;
-  let victoryParsed = null;
-  await runStep(3, 'battle-log-complete', async () => {
+  /* -- STEP 2: 3v3 で開戦 → 戦場画面 + 順序帯 + ログ + 飘字 ----------- */
+  await runStep(2, 'battlefield-3v3-live', async () => {
+    const hc = await setNumberInput(cdp, 'human-count', 3);
+    const zc = await setNumberInput(cdp, 'zombie-count', 3);
     const startBtn = await centerOf(cdp, '#btn-start');
     if (!startBtn || startBtn.w < 4) throw new Error('btn-start not visible');
-    const t0 = Date.now();
     await clickAt(cdp, startBtn.x, startBtn.y);
-    const appeared = await waitFor(cdp, "!document.getElementById('result').hidden", 30000);
-    const elapsedMs = Date.now() - t0;
+    const appeared = await waitFor(cdp, "window.GameUI.getScreen() === 'battle' && !document.getElementById('battle-screen').hidden", 10000);
+    if (!appeared) throw new Error('battle screen did not appear');
+    await sleep(250);
 
-    data3 = await evalJS(cdp, `(() => {
-      const g = (id) => document.getElementById(id);
-      return {
-        lines: [...g('battle-log').children].map((d) => d.textContent),
-        classes: [...g('battle-log').children].map((d) => d.className),
-        resultTitle: g('result-title').textContent,
-        resultText: g('result-text').textContent,
-        countsLocked: ['human-count','zombie-count'].map((id) => g(id).disabled),
-        statsLocked: ['human-hp','human-attack','human-agility','human-dmgMin','human-dmgMax',
-                      'zombie-hp','zombie-attack','zombie-agility','zombie-dmgMin','zombie-dmgMax'].map((id) => g(id).disabled),
-        startHidden: g('btn-start').hidden,
-        resetVisible: !g('btn-reset').hidden
+    const s = await evalJS(cdp, STRUCT_EXPR);
+    await fitViewport(cdp, 100); // 戦場〜ログまで一枚に収める（終局横幅ぶんの余白も確保）
+
+    const humanNames = s.humanCards.map((x) => x.name);
+    const zombieNames = s.zombieCards.map((x) => x.name);
+    const chipNames = s.chips.map((x) => x.name);
+    const orderOk = !!s.state && JSON.stringify(chipNames) === JSON.stringify(s.state.order);
+    // 先攻重投がある場合、ログ先頭は【先攻重投】行になり得るため
+    // 「見出し行が存在し、その前には重投行しかない」形で判定する
+    const hdrIdx = s.logLines.indexOf('【行动顺序】（d100 点数，从大到小）');
+    const preHeader = hdrIdx >= 0 ? s.logLines.slice(0, hdrIdx) : [];
+    const headerOk =
+      hdrIdx >= 0 && preHeader.every((l) => l.startsWith('【先攻重投】')) &&
+      s.logLines.filter((l) => /^\d+\. .+（d100=[\d→]+）$/.test(l)).length === 6;
+    const structOk =
+      s.screen === 'battle' && s.mode === 'live' && s.configHidden && !s.battleHidden &&
+      s.humanCards.length === 3 && s.zombieCards.length === 3 &&
+      JSON.stringify(humanNames) === JSON.stringify(['玩家1', '玩家2', '玩家3']) &&
+      JSON.stringify(zombieNames) === JSON.stringify(['丧尸1', '丧尸2', '丧尸3']) &&
+      s.humanCards.every((x) => x.emoji === '🧑' && x.hp === '12/12' && !x.downed) &&
+      s.zombieCards.every((x) => x.emoji === '🧟' && x.hp === '9/9' && !x.downed) &&
+      s.chips.length === 6 && s.activeCount === 1 && orderOk &&
+      (s.state.steps === 0 ? s.chips.find((x) => x.active).id === 'chip-' + s.state.order[0] : true) &&
+      headerOk &&
+      s.logLines.filter((l) => /^── 第 1 轮 ──$/.test(l)).length === 1;
+
+    // 行動が 2 つ以上出演するまで待つ（中速 800ms/ステップ）
+    const actionsSeen = await waitFor(cdp,
+      "document.querySelectorAll('#battle-log .log-action-hit,#battle-log .log-action-fail,#battle-log .log-action-dodge').length >= 2",
+      30000, 120);
+    if (!actionsSeen) throw new Error('no 2+ actions within 30s at middle speed');
+
+    // 撮影: CSS アニメを 0.1 倍速にして飘字の可視時間を伸ばし、
+    // pre/post スナップが一致する（=撮影中にステップが差し替わっていない）
+    // 最初の 1 枚を採用する。伤害飘字を優先。
+    const slowed = await setAnimRate(cdp, 0.1);
+    let caught = null;
+    for (let i = 0; i < 16 && !(caught && caught.hasDmg); i++) {
+      const pre = await evalJS(cdp, SNAP_EXPR);
+      if (!pre || pre.floats.length === 0) { await sleep(90); continue; }
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      const post = await evalJS(cdp, SNAP_EXPR);
+      const same = JSON.stringify(pre.floats) === JSON.stringify(post.floats) && pre.logCount === post.logCount;
+      if (!same) continue; // 撮影中に次ステップが乗った可能性 → 撮り直し
+      const hasDmg = pre.floats.some((f) => /^-\d+/.test(f.text));
+      caught = {
+        floats: pre.floats, lastLog: pre.lastLog, lastLogs: pre.lastLogs, logCount: pre.logCount,
+        activeChip: pre.activeChip, currentCard: pre.currentCard,
+        hasDmg, attempts: i + 1, agree: floatLogAgree(pre.floats, pre.lastLogs)
       };
-    })()`);
-    writeFileSync(join(ROOT, 'verify', 'battle-log-dump.txt'), data3.lines.join('\n') + '\n', 'utf8');
+      writeFileSync(join(SHOT_DIR, '02-battlefield.png'), Buffer.from(shot.data, 'base64'));
+      console.log('shot: ' + join(SHOT_DIR, '02-battlefield.png'));
+      if (hasDmg) break;
+      await sleep(150);
+    }
+    await setAnimRate(cdp, 1); // 撮影後は必ず 1 倍へ戻す
+    if (!caught) {
+      // 飘字を捕まえられなかった場合のフォールバック証跡
+      await shotViewport(cdp, join(SHOT_DIR, '02-battlefield.png'));
+    }
+    const fin = await evalJS(cdp, SNAP_EXPR);
 
-    ana = analyzeLog(data3.lines);
-    replay = replayValidate(ana, { human: HUMAN_MAX_HP, zombie: ZOMBIE_MAX_HP });
-    victoryParsed = parseVictory(ana.victory);
-
-    const expectSorted = [...EXPECTED_NAMES].sort().join('|');
-    const orderOk =
-      appeared && ana.header && ana.orderParsed.length === 6 && ana.orderParsed.every(Boolean) &&
-      ana.orderParsed.map((o) => o.name).sort().join('|') === expectSorted &&
-      ana.orderParsed.every((o, i) => o.no === i + 1) &&
-      ana.orderParsed.every((o) => o.rolls.length >= 1 && o.rolls.every((x) => x >= 1 && x <= 100));
-    const actionsOk = ana.actions.length > 0 && ana.actionsParsed.every((p) => p && p.kind !== 'unknown');
-    const counts = { fail: 0, dodge: 0, hit: 0 };
-    for (const p of ana.actionsParsed) if (p && counts[p.kind] !== undefined) counts[p.kind]++;
-    const lockedOk =
-      data3.countsLocked.every(Boolean) && data3.statsLocked.every(Boolean) &&
-      data3.startHidden && data3.resetVisible;
-
-    const passed = appeared && orderOk && actionsOk && replay.violations.length === 0 &&
-      !!victoryParsed && lockedOk;
-
-    /* ログ欄を一時的に全高表示にして戦闘ログ全体を 1 枚に収める */
-    await evalJS(cdp, "window.scrollTo(0, 0); document.getElementById('battle-log').style.maxHeight = 'none'");
-    await sleep(120);
-    const h = await evalJS(cdp, 'document.documentElement.scrollHeight');
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: 1400, height: Math.min(Math.max(h, 600), 12000), deviceScaleFactor: 1, mobile: false
-    });
-    await sleep(300);
-    const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
-    writeFileSync(join(SHOT_DIR, '03-battle-log.png'), Buffer.from(shot.data, 'base64'));
-    await cdp.send('Emulation.clearDeviceMetricsOverride');
-    await sleep(150);
-    await evalJS(cdp, "document.getElementById('battle-log').style.maxHeight = ''");
-    console.log('shot: ' + join(SHOT_DIR, '03-battle-log.png'));
-
+    const passed = structOk && actionsSeen && !!caught && caught.agree;
     return {
-      passed, appeared, elapsedMs, orderOk, actionsOk, counts,
-      rerolls: ana.rerolls.length, rounds: ana.rounds,
-      violations: replay.violations, victoryLine: ana.victory, victoryParsed,
-      lockedOk, logLineCount: data3.lines.length
+      passed, countsSet: { human: hc, zombie: zc }, structOk, actionsSeen, slowed,
+      humanNames, zombieNames, chipNames, activeCount: s.activeCount,
+      activeChip: s.chips.filter((x) => x.active).map((x) => x.id),
+      firstOrderLines: s.logLines.slice(0, 8), logCountAtStart: s.logCount,
+      caught: caught || null, floatsNow: fin.floats, modeNow: fin.mode, stepsNow: fin.steps
     };
   });
 
-  /* -- STEP 4: 勝敗表示 ---------------------------------------------- */
-  await runStep(4, 'result-display', async () => {
-    if (!data3) throw new Error('battle data unavailable (step3 failed)');
-    await evalJS(cdp, 'window.scrollTo(0, 0)');
-    const res = await evalJS(cdp, `(() => {
+  /* -- STEP 3: 跳到結果 → 終局横幅 + 敗側全員💀 ------------------------ */
+  await runStep(3, 'skip-to-result', async () => {
+    const modeBefore = await evalJS(cdp, 'window.GameUI.getMode()');
+    const skipBtn = await centerOf(cdp, '#btn-skip');
+    if (!skipBtn || skipBtn.w < 4) throw new Error('btn-skip not visible');
+    const skipDisabled = await evalJS(cdp, "document.getElementById('btn-skip').disabled");
+    await clickAt(cdp, skipBtn.x, skipBtn.y);
+    const done = await waitFor(cdp, "window.GameUI.getMode() === 'done' && !document.getElementById('battle-banner').hidden", 15000);
+
+    const c = await evalJS(cdp, `(() => {
       const g = (id) => document.getElementById(id);
+      const st = window.GameUI.getBattleState();
+      const cards = [...document.querySelectorAll('.unit-card')].map((el) => ({
+        id: el.id, downed: el.classList.contains('downed'),
+        emoji: el.querySelector('.unit-emoji').textContent,
+        hp: el.querySelector('.hp-num').textContent
+      }));
+      const chips = [...document.querySelectorAll('#order-strip .chip')].map((el) => ({
+        id: el.id, downed: el.classList.contains('downed'),
+        emoji: el.querySelector('.chip-emoji').textContent
+      }));
       return {
-        hidden: g('result').hidden,
-        title: g('result-title').textContent,
-        text: g('result-text').textContent,
-        logStillThere: g('battle-log').children.length
+        banner: { hidden: g('battle-banner').hidden, title: g('banner-title').textContent, body: g('banner-body').textContent },
+        members: st ? st.members.map((m) => ({ name: m.name, faction: m.faction, hp: m.hp, maxHp: m.maxHp, downed: m.downed })) : null,
+        winner: st ? st.winner : null,
+        survivors: st ? st.survivors : null,
+        cards, chips,
+        activeChips: [...document.querySelectorAll('#order-strip .chip.active')].length,
+        currentCards: [...document.querySelectorAll('.unit-card.current')].length,
+        floats: [...document.querySelectorAll('.float-text')].length,
+        log: [...g('battle-log').children].map((d) => ({ cls: d.className, text: d.textContent }))
       };
     })()`);
-    const resLines = res.text.split('\n').map((s) => {
-      const m = s.match(/^(.+?)：剩余 HP (\d+)\/(\d+)$/);
+
+    writeFileSync(join(ROOT, 'verify', 'battle-log-skip-dump.txt'), c.log.map((x) => x.text).join('\n') + '\n', 'utf8');
+
+    const ana = analyzeLog(c.log.map((x) => x.text));
+    const replay = replayValidate(ana, { human: HUMAN_MAX_HP, zombie: ZOMBIE_MAX_HP });
+    const victory = parseVictory(ana.victory);
+    const bodyLines = c.banner.body.split('\n').filter((x) => x.length > 0);
+    const bodyParsed = bodyLines.map((l) => {
+      const m = l.match(/^(.+?)：剩余 HP (\d+)\/(\d+)$/);
       return m && { name: m[1], hp: +m[2], maxHp: +m[3] };
     });
-    const linesOk = resLines.length > 0 && resLines.every(Boolean);
-    const survivorNames = victoryParsed ? victoryParsed.survivors.map((s) => s.name) : [];
-    const setEq = (arr1, arr2) => JSON.stringify([...arr1].sort()) === JSON.stringify([...arr2].sort());
-    const sameAsVictory = linesOk && victoryParsed &&
-      resLines.length === victoryParsed.survivors.length &&
-      resLines.every((r) => victoryParsed.survivors.some((s) => s.name === r.name && s.hp === r.hp && s.maxHp === r.maxHp));
-    const winnerPrefix = victoryParsed && victoryParsed.faction === '人类阵营' ? '玩家' : '丧尸';
-    const factionOk = victoryParsed &&
-      res.title.includes(victoryParsed.faction) && res.title.includes('获胜') &&
-      survivorNames.every((n) => n.startsWith(winnerPrefix)) &&
-      survivorNames.every((n) => !replay.downed.includes(n));
-    /* ログの最終残 HP と表示の整合（ダメージを受けた生存者のみ照合可能） */
-    const lastHpOk = linesOk && resLines.every((r) => {
-      for (let i = ana.actions.length - 1; i >= 0; i--) {
-        const m = ana.actions[i].match(new RegExp(r.name + ' 剩余 HP (\\d+)'));
-        if (m) return +m[1] === r.hp;
-      }
-      return r.hp === r.maxHp; // 一度も攻撃されていないなら全快
+
+    const loserFaction = c.winner === 'human' ? 'zombie' : (c.winner === 'zombie' ? 'human' : null);
+    const loserMembers = loserFaction ? c.members.filter((m) => m.faction === loserFaction) : [];
+    const loserAllDowned = loserMembers.length > 0 && loserMembers.every((m) => m.downed && m.hp === 0);
+    const cardsOk = c.members.every((m) => {
+      const card = c.cards.find((x) => x.id === 'card-' + m.name);
+      const chip = c.chips.find((x) => x.id === 'chip-' + m.name);
+      if (!card || !chip) return false;
+      return card.downed === m.downed && chip.downed === m.downed &&
+        card.emoji === (m.downed ? '💀' : (m.faction === 'human' ? '🧑' : '🧟')) &&
+        chip.emoji === (m.downed ? '💀' : (m.faction === 'human' ? '🧑' : '🧟'));
     });
-    const passed = !res.hidden && linesOk && sameAsVictory && factionOk && lastHpOk;
-    await shotFull(cdp, join(SHOT_DIR, '04-result.png'));
-    return { passed, ...res, parsed: resLines, factionOk, lastHpOk };
+    const bodyOk = bodyParsed.length > 0 && bodyParsed.every(Boolean) &&
+      JSON.stringify(bodyParsed) === JSON.stringify((c.survivors || []).map((m) => ({ name: m.name, hp: m.hp, maxHp: m.maxHp })));
+    const logVictoryOk = !!victory && !!c.survivors &&
+      JSON.stringify(victory.survivors) === JSON.stringify(c.survivors.map((m) => ({ name: m.name, hp: m.hp, maxHp: m.maxHp })));
+    const titleOk = c.banner.title.includes('🏆') && c.banner.title.includes('战斗结束') &&
+      c.banner.title.includes((c.winner === 'human' ? '人类阵营' : '丧尸阵营')) && c.banner.title.includes('获胜');
+    const settledOk = c.activeChips === 0 && c.currentCards === 0 && c.floats === 0;
+
+    const passed = done && !c.banner.hidden && titleOk && bodyOk && logVictoryOk &&
+      loserAllDowned && cardsOk && settledOk && replay.violations.length === 0 &&
+      orderSortedOk(ana) && rerollConsistent(ana);
+
+    await fitViewport(cdp, 60);
+    await shotViewport(cdp, join(SHOT_DIR, '03-victory.png'));
+
+    return {
+      passed, modeBefore, skipDisabledWhenClicked: skipDisabled, done,
+      bannerTitle: c.banner.title, bannerBody: c.banner.body, bodyParsed,
+      winner: c.winner, survivors: c.survivors, victoryLog: ana.victory, victoryParsed: victory,
+      loserFaction, loserAllDowned, cardsOk, settledOk,
+      counts: (function () { const k = { fail: 0, dodge: 0, hit: 0 }; for (const p of ana.actionsParsed) if (p && k[p.kind] !== undefined) k[p.kind]++; return k; })(),
+      rerolls: ana.rerolls.length, rounds: ana.rounds, logLines: c.log.length,
+      orderSortedOk: orderSortedOk(ana), rerollConsistent: rerollConsistent(ana),
+      violations: replay.violations
+    };
   });
 
-  /* -- STEP 5: ログの一括クリア --------------------------------------- */
-  await runStep(5, 'clear-log', async () => {
-    const btn = await centerOf(cdp, '#btn-clear-log');
-    if (!btn || btn.w < 4) throw new Error('btn-clear-log not visible');
-    await clickAt(cdp, btn.x, btn.y);
-    await sleep(250);
-    const after = await evalJS(cdp, `(() => {
-      const b = document.getElementById('battle-log');
-      return { children: b.children.length, text: b.textContent, resultStillShown: !document.getElementById('result').hidden };
+  /* -- STEP 4: 重置 → 配置画面へ戻り入力が編集可能に戻る --------------- */
+  await runStep(4, 'reset-to-config', async () => {
+    const resetBtn = await centerOf(cdp, '#btn-reset');
+    if (!resetBtn || resetBtn.w < 4) throw new Error('btn-reset not visible');
+    await clickAt(cdp, resetBtn.x, resetBtn.y);
+    const back = await waitFor(cdp, "window.GameUI.getScreen() === 'config' && !document.getElementById('config-screen').hidden", 10000);
+
+    const c = await evalJS(cdp, `(() => {
+      const g = (id) => document.getElementById(id);
+      const ids = ['human-count','human-hp','human-attack','human-agility','human-dmgMin','human-dmgMax',
+                   'zombie-count','zombie-hp','zombie-attack','zombie-agility','zombie-dmgMin','zombie-dmgMax'];
+      const fields = {};
+      for (const id of ids) fields[id] = g(id) ? { value: g(id).value, disabled: g(id).disabled } : null;
+      return {
+        screen: window.GameUI.getScreen(), mode: window.GameUI.getMode(), fields,
+        battleHidden: g('battle-screen').hidden,
+        startEnabled: !g('btn-start').disabled,
+        humanGridEmpty: g('human-grid').children.length === 0,
+        zombieGridEmpty: g('zombie-grid').children.length === 0,
+        stripEmpty: g('order-strip').children.length === 0,
+        logEmpty: g('battle-log').children.length === 0,
+        bannerHidden: g('battle-banner').hidden
+      };
     })()`);
-    const passed = after.children === 0 && after.text === '';
-    await shotFull(cdp, join(SHOT_DIR, '05-log-cleared.png'));
-    return { passed, ...after };
+    const editableOk = Object.keys(c.fields).length === 12 && Object.keys(c.fields).every((id) => !c.fields[id].disabled);
+    const valuesKept = c.fields['human-count'].value === '3' && c.fields['zombie-count'].value === '3';
+    const passed = back && c.screen === 'config' && c.battleHidden && c.mode === 'idle' &&
+      editableOk && c.startEnabled && c.humanGridEmpty && c.zombieGridEmpty &&
+      c.stripEmpty && c.logEmpty && c.bannerHidden;
+    await shotFull(cdp, join(SHOT_DIR, '04-reset-config.png'));
+    return { passed, back, editableOk, valuesKept, startEnabled: c.startEnabled, emptied: { humanGrid: c.humanGridEmpty, zombieGrid: c.zombieGridEmpty, strip: c.stripEmpty, log: c.logEmpty, bannerHidden: c.bannerHidden } };
+  });
+
+  /* -- STEP 5: 「快」に切替 → スキップ無しで自動完走まで待つ（上限 120s）
+         速度ボタンは戦場ページの操作バー内（配置ページには存在しない）。
+         実 UI の流れに沿い「開戦 → 直後に「快」へ切替 → 待機」とする ------- */
+  await runStep(5, 'fast-speed-autoplay-complete', async () => {
+    const startBtn = await centerOf(cdp, '#btn-start');
+    if (!startBtn || startBtn.w < 4) throw new Error('btn-start not visible');
+    await clickAt(cdp, startBtn.x, startBtn.y);
+    const started = await waitFor(cdp, "window.GameUI.getScreen() === 'battle' && window.GameUI.getMode() === 'live'", 10000);
+    if (!started) throw new Error('battle screen did not appear');
+    const t0 = Date.now();
+
+    const fastBtn = await centerOf(cdp, '#speed-fast');
+    if (!fastBtn || fastBtn.w < 4) throw new Error('speed-fast not visible on battle screen');
+    await clickAt(cdp, fastBtn.x, fastBtn.y);
+    await sleep(150);
+    const speedState = await evalJS(cdp, `(() => ({
+      speed: window.GameUI.getSpeed(),
+      activeBtn: (document.querySelector('.speed-btn.active') || {}).id || null
+    }))()`);
+    const finished = await waitFor(cdp, "window.GameUI.getMode() === 'done'", 120000, 250);
+    const elapsedMs = Date.now() - t0;
+    if (!started || !finished) throw new Error('battle did not auto-complete: started=' + started + ' finished=' + finished);
+
+    const c = await evalJS(cdp, `(() => {
+      const g = (id) => document.getElementById(id);
+      const st = window.GameUI.getBattleState();
+      const log = g('battle-log');
+      return {
+        banner: { hidden: g('battle-banner').hidden, title: g('banner-title').textContent, body: g('banner-body').textContent },
+        winner: st ? st.winner : null,
+        survivors: st ? st.survivors : null,
+        steps: st ? st.steps : null,
+        members: st ? st.members.map((m) => ({ name: m.name, faction: m.faction, hp: m.hp, maxHp: m.maxHp, downed: m.downed })) : null,
+        logLines: [...log.children].map((d) => d.textContent),
+        logScroll: { top: log.scrollTop, clientH: log.clientHeight, scrollH: log.scrollHeight }
+      };
+    })()`);
+
+    writeFileSync(join(ROOT, 'verify', 'battle-log-dump.txt'), c.logLines.join('\n') + '\n', 'utf8');
+
+    const ana = analyzeLog(c.logLines);
+    const replay = replayValidate(ana, { human: HUMAN_MAX_HP, zombie: ZOMBIE_MAX_HP });
+    const victory = parseVictory(ana.victory);
+    const bodyParsed = c.banner.body.split('\n').filter((x) => x.length > 0).map((l) => {
+      const m = l.match(/^(.+?)：剩余 HP (\d+)\/(\d+)$/);
+      return m && { name: m[1], hp: +m[2], maxHp: +m[3] };
+    });
+    const loserFaction = c.winner === 'human' ? 'zombie' : (c.winner === 'zombie' ? 'human' : null);
+    const loserMembers = loserFaction ? c.members.filter((m) => m.faction === loserFaction) : [];
+    const loserAllDowned = loserMembers.length > 0 && loserMembers.every((m) => m.downed && m.hp === 0);
+    const bodyOk = bodyParsed.length > 0 && bodyParsed.every(Boolean) &&
+      JSON.stringify(bodyParsed) === JSON.stringify((c.survivors || []).map((m) => ({ name: m.name, hp: m.hp, maxHp: m.maxHp })));
+    const logVictoryOk = !!victory && !!c.survivors &&
+      JSON.stringify(victory.survivors) === JSON.stringify(c.survivors.map((m) => ({ name: m.name, hp: m.hp, maxHp: m.maxHp })));
+    // ログ末尾の残 HP とバナー表示の整合（攻撃された生存者のみ照合可能）
+    const lastHpOk = !!victory && victory.survivors.every((s) => {
+      for (let i = ana.actions.length - 1; i >= 0; i--) {
+        const m = ana.actions[i].match(new RegExp(s.name + ' 剩余 HP (\\d+)'));
+        if (m) return +m[1] === s.hp;
+      }
+      return s.hp === s.maxHp;
+    });
+    const autoscrollOk = c.logScroll.scrollH > c.logScroll.clientH
+      ? c.logScroll.top + c.logScroll.clientH >= c.logScroll.scrollH - 6
+      : null;
+    const replayDowned = [...replay.downed].sort();
+    // 勝側にも陣亡者は出る（survivors から外れるだけ）ため、
+    // 期待する倒地集合は「state で downed===true の全メンバー」とする
+    const expectDowned = c.members.filter((m) => m.downed).map((m) => m.name).sort();
+    const downedSetOk = JSON.stringify(replayDowned) === JSON.stringify(expectDowned);
+
+    const counts = { fail: 0, dodge: 0, hit: 0 };
+    for (const p of ana.actionsParsed) if (p && counts[p.kind] !== undefined) counts[p.kind]++;
+
+    // 実コントロール（実クリック）で「快」へ切替できたことが合格条件
+    const switchOk = speedState.speed === 'fast' && speedState.activeBtn === 'speed-fast';
+
+    const passed = started && finished && !c.banner.hidden && c.winner &&
+      switchOk && loserAllDowned && bodyOk && logVictoryOk && lastHpOk && downedSetOk &&
+      replay.violations.length === 0 && orderSortedOk(ana) && rerollConsistent(ana) &&
+      ana.orderParsed.length === 6 && ana.actions.length > 0;
+
+    await fitViewport(cdp, 60);
+    await shotViewport(cdp, join(SHOT_DIR, '05-fast-complete.png'));
+
+    // 診断用プローブ（判定には使わない）: GameUI.setSpeed API 経由なら
+    // 切替が効くことを確認し、欠陥を「ボタン未配線」に特定する
+    const apiProbe = await evalJS(cdp, `(() => {
+      const before = { speed: window.GameUI.getSpeed(), activeBtn: (document.querySelector('.speed-btn.active') || {}).id || null };
+      window.GameUI.setSpeed('fast');
+      return { before, after: { speed: window.GameUI.getSpeed(), activeBtn: (document.querySelector('.speed-btn.active') || {}).id || null } };
+    })()`);
+
+    return {
+      passed, speedState, switchOk, apiProbe, started, finished, elapsedMs, engineSteps: c.steps,
+      bannerTitle: c.banner.title, bannerBody: c.banner.body,
+      winner: c.winner, survivors: c.survivors, victoryLog: ana.victory,
+      loserFaction, loserAllDowned, downedSetOk, replayDowned, expectDowned, bodyOk, logVictoryOk, lastHpOk,
+      counts, rerolls: ana.rerolls.length, rounds: ana.rounds, orderLines: ana.orderParsed,
+      orderSortedOk: orderSortedOk(ana), rerollConsistent: rerollConsistent(ana),
+      logLines: c.logLines.length, autoscrollOk, violations: replay.violations
+    };
   });
 
   const allPassed = steps.every((s) => s.passed);
-  writeFileSync(join(ROOT, 'verify', 'e2e-findings.json'), JSON.stringify({ allPassed, steps }, null, 2), 'utf8');
+  writeFileSync(join(ROOT, 'verify', 'e2e-findings.json'),
+    JSON.stringify({ allPassed, pageErrors, steps }, null, 2), 'utf8');
   console.log(allPassed ? 'ALL STEPS PASSED' : 'SOME STEPS FAILED');
   return allPassed ? 0 : 1;
 }
@@ -544,7 +854,8 @@ try {
   console.error('FATAL: ' + String((e && e.message) || e));
   cleanup();
   try {
-    writeFileSync(join(ROOT, 'verify', 'e2e-findings.json'), JSON.stringify({ allPassed: false, fatal: String((e && e.message) || e), steps }, null, 2), 'utf8');
+    writeFileSync(join(ROOT, 'verify', 'e2e-findings.json'),
+      JSON.stringify({ allPassed: false, fatal: String((e && e.message) || e), pageErrors, steps }, null, 2), 'utf8');
   } catch { /* ignore */ }
   process.exit(2);
 }

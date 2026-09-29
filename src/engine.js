@@ -14,13 +14,16 @@
     する。エンジンの呼び出しと DOM 描画だけを担う。
 
 ■ 乱数の注入（GameEngine）
-  * d100 / d7 / ダメージ・目標選択のすべてのロールは最終引数 rng
-    （() => [0,1) の乱数）を経由する。省略した場合は Math.random を使う。
+  * d100 / d7 / ダメージ・目標選択・移動先選択・初期配置抽選のすべての
+    ロールは最終引数 rng（() => [0,1) の乱数）を経由する。省略した場合は
+    Math.random を使う。
   * GameEngine.createRng(seed) で mulberry32 ベースの再現可能な乱数源を
     作れる（テスト・デバッグ用）。
-  * 戦闘の乱数は「1 本の乱数列」を順に消費する。したがって同一の rng を
-    与えた場合、次の 2 経路は最終 state（members / order / rolls / log すべて）
-    の JSON 比較で完全一致する（ADR 0001 の一貫性保証）：
+  * 戦闘の乱数は「1 本の乱数列」を順に消費する。消費順は
+    「初期配置（1 人につき 1 回）→ 行動順 d100（同点の重投を含む）→
+    戦闘中の各行動」の固定順。したがって同一の rng を与えた場合、次の
+    2 経路は最終 state（members / order / rolls / log すべて）の JSON 比較で
+    完全一致する（ADR 0001 の一貫性保証）：
       (a) GameEngine.runBattle(config, rng)                       （整場一括結算）
       (b) GameEngine.startBattle(config, rng) の後、
           GameEngine.stepBattle(state, rng) を終局まで繰り返す     （逐次実行）
@@ -39,28 +42,31 @@
 ■ GameEngine API 一覧
   --- 定数・乱数・設定検査 ---
   GameEngine.MAX_STEPS                  : 無限ループ防止のステップ上限。書き換え可（既定 100000）
-  GameEngine.DEFAULT_CONFIG             : 既定設定 { human: {...}, zombie: {...} }
+  GameEngine.DEFAULT_CONFIG             : 既定設定 { placement, human: {...}, zombie: {...} }
   GameEngine.FACTION_LABEL              : 陣営表示名 { human: '人类阵营', zombie: '丧尸阵营' }
   GameEngine.NAME_PREFIX                : メンバー名の接頭辞 { human: '玩家', zombie: '丧尸' }
   GameEngine.createRng(seed)            : () => [0,1) の種付き乱数源を返す
   GameEngine.rollD(sides, rng?)         : 1..sides の整数
   GameEngine.randInt(min, max, rng?)    : min..max の整数（両端を含む）
   GameEngine.validateConfig(config)     : 設定検査。不備の簡体中文メッセージ配列（空配列なら正当）
-  --- state 生成と先攻決定 ---
-  GameEngine.createBattleState(config)  : 初期 state（未ダイス）を返す
-  GameEngine.rollInitiative(state, rng?): d100 で先攻順を決定する。同点者はその組だけで
+  --- state 生成と初期配置・先攻決定 ---
+  GameEngine.createBattleState(config)  : 初期 state（未ダイス・未配置。pos は null）を返す
+  GameEngine.rollInitiative(state, rng?): d100 で行動順を決定する。同点者はその組だけで
                                           重投を繰り返し（重投点は組内のみで比較し、
                                           組内で順位が分かるまで）、過程をログに残す。
-                                          新しい state を返す
+                                          state が配置済み（pos != null）なら order 行の
+                                          行尾に初期座標を付す。新しい state を返す
   --- 整場一括結算（従来 API・そのまま維持） ---
   GameEngine.takeTurn(state, rng?)      : 現在の行動者の行動を 1 回実行。新しい state を返す
-                                          （終局済み state を渡した場合は入力をそのまま返す）
-  GameEngine.runBattle(config, rng?)    : 設定検査 → state 生成 → 先攻決定 → 行動ループで
-                                          完走させ、最終 state を返す（不正設定は例外）
+                                          （終局済み state を渡した場合は入力をそのまま返す。
+                                            行動には配置済み state が必要）
+  GameEngine.runBattle(config, rng?)    : 設定検査 → state 生成 → 初期配置 → 行動順 d100 →
+                                          行動ループで完走させ、最終 state を返す
+                                          （不正設定は例外）
   --- ステップ実行（逐行動リアルタイム演出用・ADR 0001） ---
-  GameEngine.startBattle(config, rng?)  : 設定検査 → state 生成 → 先攻決定までを行い、
-                                          開始 state を返す（runBattle の前半と同一経路。
-                                          不正設定は例外）
+  GameEngine.startBattle(config, rng?)  : 設定検査 → state 生成 → 初期配置 → 行動順 d100
+                                          までを行い、開始 state を返す（runBattle の前半と
+                                          同一経路。不正設定は例外）
   GameEngine.stepBattle(state, rng?)    : 行動を 1 つ実行し { state, event } を返す。
                                           takeTurn と同一の乱数消費・state 遷移で、
                                           event は演出用の観測データ（下記参照）。
@@ -79,6 +85,10 @@
   { kind: 'dodge',  actor, target, atkRoll, attack, dodgeRoll, agility }
   { kind: 'hit',    actor, target, atkRoll, attack, dodgeRoll, agility,
                     damage, hpBefore, hpAfter, downed }
+  { kind: 'move',   actor, from, to }           : 1 マス移動。from/to は {row, col}
+                                                  （座標は 1 始まり。from/to は
+                                                  state 内 pos とは別オブジェクト）
+  { kind: 'blocked', actor }                    : 移動候補なし。乱数を消費しない
   { kind: 'forced-draw' }                       : MAX_STEPS 到達による強制終了
   そのステップで終局した場合はさらに finished: true と
   winner: 'human'|'zombie'|'draw' を付す。
@@ -116,12 +126,22 @@
 
 ■ config / state の形
   config = {
+    placement: 'mixed' | 'split'（初期配置モード。省略 / undefined は 'mixed' 扱い。
+                null・空文字・非文字列・その他の値は検査で簡体中文エラー）,
     human:  { count, hp, attack, agility, dmgMin, dmgMax },
     zombie: { count, hp, attack, agility, dmgMin, dmgMax }
   }
+  * count は各陣営 1..36（9×9=81 マスに収まる上限。36+36=72 ≤ 81）。
   state = {
     members:  [ { name, faction: 'human'|'zombie', maxHp, hp, attack,
-                  agility, dmgMin, dmgMax, downed } ... ],
+                  agility, dmgMin, dmgMax, downed,
+                  pos } ... ],
+    * pos: { row, col }（1 始まりのマス座標。左上が (1,1)）。
+      初期配置前は null。値语义であり、丸ごと置き換えるか、複製時は
+      深コピーする（row/col の原地書き換えはしない。浅いクローンが pos の
+      参照を共有すると「入力 state を破壊しない」不変条件が壊れるため）。
+      倒地しても pos は純データとして残る（描画・移動阻害・目標選択の
+      いずれにも使われない）。
     order:    [ メンバー名 ... ]（行動順。戦闘中は不変）,
     rolls:    { メンバー名: d100 出目の履歴 [第1投, 重投1, ...] },
     turnIndex, round, steps,
@@ -130,8 +150,21 @@
     survivors:[ { name, hp, maxHp } ... ]（勝利側の生存者）,
     log:      [ { type, text } ... ]（type: order-header / order / reroll /
                                           round / action-fail / action-dodge /
-                                          action-hit / victory）
+                                          action-hit / action-move /
+                                          action-blocked / victory）
   }
+  * 開戦までの経路は「設定検査 → state 生成（pos は null）→ 初期配置 →
+    行動順 d100」の固定順。初期配置は作成順（玩家1..n → 丧尸1..n）に
+    1 人ずつ randInt(0, k-1) で残り空きマス（行列表順）から抽選する
+    （mixed は全 81 マスの共有プール、split は各陣営 36 マスの半区で、
+    中列 5 は空置）。order 行のログは行尾に初期座標を付す:
+    「1. 玩家1（d100=50）（3,4）」。
+  * 各行動の構造: 上下左右 4 隣接に未倒地の敵がいれば攻撃（隣接集合から
+    randInt で 1 人選び、攻撃 d7 → 回避 d7 → 伤害の既存経路）。
+    いなければ候補マス（界内かつ未倒地の誰もいない 4 隣接、行列表順）へ
+    1 マス移動し、「全未倒地敵へのマンハッタン距離の最小値」が最小のマスを
+    randInt で選ぶ（候補 1 マスでも抽選する）。候補なしは
+    「X 无法移动（无路可走）」ログで行動終了（乱数 0 回）。
 ======================================================================
 */
 
@@ -144,6 +177,7 @@
 
   // 仕様書のデフォルト値
   var DEFAULT_CONFIG = {
+    placement: 'mixed',
     human:  { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
     zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 }
   };
@@ -205,6 +239,12 @@
   // 設定を検査し、不備のメッセージ配列を返す（空配列なら正当）
   api.validateConfig = function (config) {
     var errors = [];
+    // 初期配置モード: 欠落 / undefined のみ 'mixed' の既定扱い。それ以外の
+    // 値（null・空文字・非文字列を含む）は 'mixed' | 'split' のみ正当。
+    var placement = config ? config.placement : undefined;
+    if (placement !== undefined && placement !== 'mixed' && placement !== 'split') {
+      errors.push('初始站位的取值必须是 mixed 或 split');
+    }
     var factions = ['human', 'zombie'];
     for (var i = 0; i < factions.length; i++) {
       var f = factions[i];
@@ -214,7 +254,7 @@
         errors.push(label + '的配置缺失');
         continue;
       }
-      checkInt(errors, label, '人数', c.count, 1, 99);
+      checkInt(errors, label, '人数', c.count, 1, 36);
       checkInt(errors, label, 'HP', c.hp, 1, 9999);
       checkInt(errors, label, '攻击', c.attack, 0, 99);
       checkInt(errors, label, '敏捷', c.agility, 0, 99);
@@ -230,7 +270,7 @@
 
   // ---- state 生成 ----------------------------------------------------
 
-  // メンバー 1 人を生成する
+  // メンバー 1 人を生成する（pos は初期配置まで null）
   function makeMember(faction, index, stats) {
     return {
       name: NAME_PREFIX[faction] + index,
@@ -241,7 +281,8 @@
       agility: stats.agility,
       dmgMin: stats.dmgMin,
       dmgMax: stats.dmgMax,
-      downed: false
+      downed: false,
+      pos: null
     };
   }
 
@@ -254,9 +295,15 @@
   // state の複製。log の各エントリは push 以後に決して書き替えないため、
   // log 配列は浅いコピーで共有する（ステップ実行で毎歩 clone しても
   // ログ長に比例した増幅が起きないようにするため。メンバー等は深い複製）。
+  // pos は値语义（{row,col} の丸ごと置き換えが唯一の更新手段）なので、
+  // 浅いコピーで参照を共有せず必ず複製し直す。
   function cloneState(s) {
     return {
-      members: s.members.map(function (m) { return Object.assign({}, m); }),
+      members: s.members.map(function (m) {
+        var c = Object.assign({}, m);
+        c.pos = m.pos ? { row: m.pos.row, col: m.pos.col } : null;
+        return c;
+      }),
       order: s.order.slice(),
       rolls: clone(s.rolls),
       turnIndex: s.turnIndex,
@@ -269,14 +316,14 @@
     };
   }
 
-  // 初期 state を生成する（config は書き換えない）
+  // 初期 state を生成する（config は書き換えない。pos は未配置の null）
   api.createBattleState = function (config) {
     var members = [];
     var i;
     for (i = 1; i <= config.human.count; i++) members.push(makeMember('human', i, config.human));
     for (i = 1; i <= config.zombie.count; i++) members.push(makeMember('zombie', i, config.zombie));
     return {
-      members: members,   // 全メンバー（両陣営）
+      members: members,   // 全メンバー（両陣営・作成順）
       order: [],          // 行動順（メンバー名の配列、戦闘中不変）
       rolls: {},          // メンバー名 → 先攻 d100 出目
       turnIndex: 0,       // order 内の現在位置
@@ -288,6 +335,72 @@
       log: []             // {type, text} の配列
     };
   };
+
+  // ---- 戦場グリッド（9×9）と初期配置 ---------------------------------
+
+  // 一辺のマス数。座標は 1 始まりで (1,1) が左上
+  var GRID_SIZE = 9;
+
+  // 座標のログ表記（全角括号＋半角カンマ）: （3,4）
+  function cellText(p) {
+    return '（' + p.row + ',' + p.col + '）';
+  }
+
+  // 界内判定（行・列とも 1..GRID_SIZE）
+  function inBounds(p) {
+    return p.row >= 1 && p.row <= GRID_SIZE && p.col >= 1 && p.col <= GRID_SIZE;
+  }
+
+  // マンハッタン距離
+  function manhattan(a, b) {
+    return Math.abs(a.row - b.row) + Math.abs(a.col - b.col);
+  }
+
+  // 上下左右の 4 隣接か（斜めは含まない）
+  function isAdjacent(a, b) {
+    return manhattan(a, b) === 1;
+  }
+
+  // 4 隣接マスの一覧（行列表順: 上 → 左 → 右 → 下）
+  function fourNeighbors(p) {
+    return [
+      { row: p.row - 1, col: p.col },
+      { row: p.row,     col: p.col - 1 },
+      { row: p.row,     col: p.col + 1 },
+      { row: p.row + 1, col: p.col }
+    ];
+  }
+
+  // 配置候補マスの一覧（行列表順）。列 cMin..cMax の全行。
+  // mixed は 1..9（全 81 マス）、split は 人类 1..4 / 丧尸 6..9（中列 5 空置）。
+  function placementPool(cMin, cMax) {
+    var cells = [];
+    for (var r = 1; r <= GRID_SIZE; r++) {
+      for (var c = cMin; c <= cMax; c++) cells.push({ row: r, col: c });
+    }
+    return cells;
+  }
+
+  // 初期配置: 作成順（玩家1..n → 丧尸1..n。s.members の並び）に 1 人ずつ
+  // randInt(0, k-1) で「残り空きマス（行列表順）」から 1 マス抽選する
+  // （k はその時点の残り数。1 人につき乱数はちょうど 1 回）。
+  // mixed は両陣営で 1 つの共有プールを消費し、split は各陣営が自分の
+  // 半区 36 マスのプールを消費する（互いに重複し得ないため別プールでよい）。
+  function applyPlacement(s, config, rng) {
+    var mode = (config && config.placement === 'split') ? 'split' : 'mixed';
+    var shared = placementPool(1, GRID_SIZE);
+    var pools = mode === 'split'
+      ? { human: placementPool(1, 4), zombie: placementPool(6, GRID_SIZE) }
+      : { human: shared, zombie: shared };
+    for (var i = 0; i < s.members.length; i++) {
+      var m = s.members[i];
+      var pool = pools[m.faction];
+      var idx = api.randInt(0, pool.length - 1, rng);
+      var cell = pool[idx];
+      pool.splice(idx, 1);
+      m.pos = { row: cell.row, col: cell.col }; // 値语义: pos は丸ごと置き換える
+    }
+  }
 
   // ---- 先攻順 --------------------------------------------------------
 
@@ -361,9 +474,14 @@
     s.turnIndex = 0;
     s.log.push({ type: 'order-header', text: '【行动顺序】（d100 点数，从大到小）' });
     for (i = 0; i < names.length; i++) {
+      // 初期配置済みの state（runBattle / startBattle の経路）は行尾に
+      // 初期座標を付す。未配置 state（pos === null）への直接呼び出しでは
+      // 座標表記を付けない（テスト用の部分 state を壊さないための配慮）。
+      var placed = findMember(s, names[i]);
+      var coord = (placed && placed.pos) ? cellText(placed.pos) : '';
       s.log.push({
         type: 'order',
-        text: (i + 1) + '. ' + names[i] + '（d100=' + history[names[i]].join('→') + '）'
+        text: (i + 1) + '. ' + names[i] + '（d100=' + history[names[i]].join('→') + '）' + coord
       });
     }
     s.log.push({ type: 'round', text: '── 第 1 轮 ──' });
@@ -418,6 +536,60 @@
   // 現在の行動者の 1 行動を実行する（s を直接書き換える内部用関数）。
   // ev を渡した場合は演出用の観測データ（event）をここに記録する。
   // ev は state 遷移・乱数消費に一切影響しない。
+  //
+  // 移動または移動不能の処理（隣接敵がいない場合の行動）。
+  // 候補マスは「界内かつ未倒地の誰も占めていない 4 隣接」（行列表順）。
+  // 各候補について「全未倒地敵へのマンハッタン距離の最小値」を求め、
+  // その最小値が最も小さい候補の中から randInt で 1 マス選ぶ
+  // （候補が 1 マスでも必ず 1 回抽選）。候補が 1 つもなければ
+  // 「无法移动」ログを残して行動終了（乱数は 0 回）。
+  function moveOrBlock(s, actor, enemies, rng, ev) {
+    var cands = fourNeighbors(actor.pos).filter(function (c) {
+      if (!inBounds(c)) return false;
+      for (var i = 0; i < s.members.length; i++) {
+        var m = s.members[i];
+        if (!m.downed && m.pos && m.pos.row === c.row && m.pos.col === c.col) return false;
+      }
+      return true;
+    });
+    if (cands.length === 0) {
+      s.log.push({ type: 'action-blocked', text: actor.name + ' 无法移动（无路可走）' });
+      if (ev) { ev.kind = 'blocked'; ev.actor = actor.name; }
+      advanceTurn(s);
+      return;
+    }
+    var best = Infinity;
+    var bestCells = [];
+    for (var i = 0; i < cands.length; i++) {
+      var d = Infinity;
+      for (var j = 0; j < enemies.length; j++) {
+        var md = manhattan(cands[i], enemies[j].pos);
+        if (md < d) d = md;
+      }
+      if (d < best) {
+        best = d;
+        bestCells = [cands[i]];
+      } else if (d === best) {
+        bestCells.push(cands[i]);
+      }
+    }
+    var pick = bestCells[api.randInt(0, bestCells.length - 1, rng)];
+    var from = { row: actor.pos.row, col: actor.pos.col };
+    actor.pos = { row: pick.row, col: pick.col }; // 値语义: pos は丸ごと置き換える
+    s.log.push({
+      type: 'action-move',
+      text: actor.name + ' 移动：' + cellText(from) + '→' + cellText(pick)
+    });
+    if (ev) {
+      ev.kind = 'move';
+      ev.actor = actor.name;
+      ev.from = from;
+      ev.to = { row: pick.row, col: pick.col };
+    }
+    // 移動では誰も倒れないため終局判定は不要（順序だけ進める）
+    advanceTurn(s);
+  }
+
   function stepMutate(s, rng, ev) {
     s.steps++;
     if (s.steps > api.MAX_STEPS) {
@@ -436,18 +608,29 @@
       advanceTurn(s);
       return;
     }
-    // 対立陣営の未倒地メンバーから無作為に 1 人選ぶ
+    // 対立陣営の未倒地メンバー（攻撃の間接的な候補集合）
     var enemyFaction = actor.faction === 'human' ? 'zombie' : 'human';
-    var targets = s.members.filter(function (m) {
+    var enemies = s.members.filter(function (m) {
       return m.faction === enemyFaction && !m.downed;
     });
-    if (targets.length === 0) {
+    if (enemies.length === 0) {
       // 通常起こらない（直前の行動後に終了判定済み）。保険として終了判定だけ行う。
       if (ev) ev.kind = 'none';
       checkBattleEnd(s);
       return;
     }
-    var target = targets[api.randInt(0, targets.length - 1, rng)];
+    // 隣接（上下左右 4 方向）している未倒地敵を作成順に列挙する
+    var adjacent = enemies.filter(function (m) {
+      return isAdjacent(m.pos, actor.pos);
+    });
+    if (adjacent.length > 0) {
+      // 攻撃: 隣接敵の中から等確率で 1 人選ぶ（候補 1 体でも必ず 1 回抽選）。
+      // 攻撃 d7 → 回避 d7 → 伤害の各公式と判定境界は既存のまま一切変えない。
+      var target = adjacent[api.randInt(0, adjacent.length - 1, rng)];
+    } else {
+      moveOrBlock(s, actor, enemies, rng, ev);
+      return;
+    }
     var head = actor.name + ' → ' + target.name + '：';
 
     // 1) 攻撃判定：d7 ＞ 自分の攻撃値 なら失敗
@@ -519,12 +702,15 @@
     return s;
   };
 
-  // 設定から戦闘を完走させる（不正設定は例外）
+  // 設定から戦闘を完走させる（不正設定は例外）。
+  // 経路は「設定検査 → state 生成 → 初期配置 → 行動順 d100 → 行動ループ」。
   api.runBattle = function (config, rng) {
     var errors = api.validateConfig(config);
     if (errors.length > 0) throw new Error(errors.join('；'));
     var r = normRng(rng);
-    var s = api.rollInitiative(api.createBattleState(config), r);
+    var s = api.createBattleState(config);
+    applyPlacement(s, config, r);
+    s = api.rollInitiative(s, r);
     while (!s.finished) stepMutate(s, r);
     return s;
   };
@@ -533,12 +719,15 @@
   // runBattle / takeTurn と同一の内部経路を使うため、同一 rng なら
   // 逐次実行と整場一括結算の結果は完全一致する（先頭コメント塊参照）。
 
-  // 設定検査 → 初期 state 生成 → 先攻決定 までを行い、開始 state を返す。
-  // runBattle の前半と完全に同じ経路（不正設定は例外）。
+  // 設定検査 → 初期 state 生成 → 初期配置 → 先攻決定 までを行い、
+  // 開始 state を返す。runBattle の前半と完全に同じ経路（不正設定は例外）。
   api.startBattle = function (config, rng) {
     var errors = api.validateConfig(config);
     if (errors.length > 0) throw new Error(errors.join('；'));
-    return api.rollInitiative(api.createBattleState(config), normRng(rng));
+    var r = normRng(rng);
+    var s = api.createBattleState(config);
+    applyPlacement(s, config, r);
+    return api.rollInitiative(s, r);
   };
 
   // ステップ実行版 takeTurn：1 行動を実行し { state, event } を返す。

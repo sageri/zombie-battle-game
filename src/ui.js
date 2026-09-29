@@ -13,9 +13,10 @@
 
   // ---- 定数 ----------------------------------------------------------
 
-  // 設定フィールド定義（入力欄の生成と入力値の読み取りに使う）
+  // 設定フィールド定義（入力欄の生成と入力値の読み取りに使う）。
+  // 人数上限は 9×9=81 マスに収まる 36（エンジンの validateConfig と一致）
   var FIELDS = [
-    { key: 'count',   label: '人数',     min: 1,    max: 99 },
+    { key: 'count',   label: '人数',     min: 1,    max: 36 },
     { key: 'hp',      label: 'HP',      min: 1,    max: 9999 },
     { key: 'attack',  label: '攻击',    min: 0,    max: 99 },
     { key: 'agility', label: '敏捷',    min: 0,    max: 99 },
@@ -86,8 +87,13 @@
   var battleGen = 0;        // 戦闘ごとの代号（開戦/リセットで++、过期回调の無効化）
   var pendingTimer = null;  // 予約済みの次ステップ
   var renderedLogCount = 0; // 画面に描画済みの log 先頭数（追記描画用）
-  var cardRefs = {};        // 名前 → { card, emoji, fill, hpText, float }
+  var cardRefs = {};        // 名前 → { card, emoji, fill, float }
   var chipRefs = {};        // 名前 → { chip, emoji }
+
+  // ---- 戦場グリッド定数 ----------------------------------------------
+  // CSS 側（.grid-cell / .unit-card の 44px）と必ず一致させること
+  var GRID_SIZE = 9;        // 一辺のマス数（エンジンの 9×9 と一致）
+  var CELL_PX = 44;         // 1 マスの辺長 px
 
   // ---- 小道具 --------------------------------------------------------
 
@@ -97,6 +103,7 @@
         $(f + '-' + fd.key).disabled = !enabled;
       });
     });
+    $('config-placement').disabled = !enabled; // 初期站位も全局設定として一緒にロック
     $('btn-start').disabled = !enabled;
   }
 
@@ -146,9 +153,10 @@
     });
   }
 
-  // 入力欄から設定値を集める
+  // 入力欄から設定値を集める（placement は全局セレクトから）
   function readConfig() {
     var cfg = {};
+    cfg.placement = $('config-placement').value;
     FACTIONS.forEach(function (f) {
       var c = {};
       FIELDS.forEach(function (fd) {
@@ -159,14 +167,28 @@
     return cfg;
   }
 
-  // ---- 戦場の描画 ----------------------------------------------------
+  // ---- 戦場（9×9 グリッド）の描画 ------------------------------------
 
-  // キャラカードを一度だけ組み立てる（以後は updateCards で差し替え）
+  // マス座標 → カードの transform（translate で滑り移動を表現）。
+  // CELL_PX は CSS の .grid-cell / .unit-card と必ず一致させる
+  function transformFor(pos) {
+    return 'translate(' + (pos.col - 1) * CELL_PX + 'px, ' + (pos.row - 1) * CELL_PX + 'px)';
+  }
+
+  // 戦場を一度だけ組み立てる: 81 マス＋全カード（以後は updateCards で更新）。
+  // カードはマスの中に絶対配置し、transform の遷移で滑り移動する。
+  // 名前は血条の下に広げる余裕がないため title 属性（ホバー表示）に載せる。
   function buildCards() {
     cardRefs = {};
-    var grids = { human: $('human-grid'), zombie: $('zombie-grid') };
-    grids.human.innerHTML = '';
-    grids.zombie.innerHTML = '';
+    var grid = $('battle-grid');
+    grid.innerHTML = '';
+    for (var r = 1; r <= GRID_SIZE; r++) {
+      for (var c = 1; c <= GRID_SIZE; c++) {
+        var cell = document.createElement('div');
+        cell.className = 'grid-cell' + ((r + c) % 2 === 0 ? ' alt' : '');
+        grid.appendChild(cell);
+      }
+    }
     for (var i = 0; i < state.members.length; i++) {
       var m = state.members[i];
       var card = document.createElement('div');
@@ -174,30 +196,27 @@
       card.id = 'card-' + m.name;
       var emoji = document.createElement('div');
       emoji.className = 'unit-emoji';
-      var name = document.createElement('div');
-      name.className = 'unit-name';
-      name.textContent = m.name;
       var bar = document.createElement('div');
       bar.className = 'hp-bar';
       var fill = document.createElement('div');
       fill.className = 'hp-fill';
       bar.appendChild(fill);
-      var hpText = document.createElement('div');
-      hpText.className = 'hp-num';
       var floatLayer = document.createElement('div');
       floatLayer.className = 'float-layer';
       card.appendChild(emoji);
-      card.appendChild(name);
       card.appendChild(bar);
-      card.appendChild(hpText);
       card.appendChild(floatLayer);
-      grids[m.faction].appendChild(card);
-      cardRefs[m.name] = { card: card, emoji: emoji, fill: fill, hpText: hpText, float: floatLayer };
+      // DOM 挿入前に初期位置を確定させる（原点からの遷移演出を避ける）
+      card.style.transform = transformFor(m.pos);
+      card.title = m.name;
+      grid.appendChild(card);
+      cardRefs[m.name] = { card: card, emoji: emoji, fill: fill, float: floatLayer };
     }
     updateCards();
   }
 
-  // 現在 state に合わせてカード（Emoji・血条・倒地状態）を更新する
+  // 現在 state に合わせてカード（Emoji・血条・位置・倒地状態）を更新する。
+  // 倒地カードはグリッドから即時除去（表示のみ消し、順序帯は灰化 💀 を保つ）
   function updateCards() {
     if (!state) return;
     for (var i = 0; i < state.members.length; i++) {
@@ -205,9 +224,9 @@
       var r = cardRefs[m.name];
       if (!r) continue;
       r.emoji.textContent = m.downed ? DOWNED_EMOJI : UNIT_EMOJI[m.faction];
-      r.hpText.textContent = m.hp + '/' + m.maxHp;
       var pct = Math.max(0, Math.min(100, (m.hp / m.maxHp) * 100));
       r.fill.style.width = pct + '%';
+      if (m.pos) r.card.style.transform = transformFor(m.pos);
       if (m.downed) r.card.classList.add('downed');
       else r.card.classList.remove('downed');
     }
@@ -379,7 +398,9 @@
     }
   }
 
-  // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・ログ）
+  // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・ログ）。
+  // move は updateCards の transform 更新だけで滑り移動が表現され、
+  // blocked はカードの動きなしでログだけが残る（いずれも通常の速度遅延で進む）
   function applyEvent(ev) {
     clearFloats();
     updateCards();
@@ -394,6 +415,10 @@
       floatOn(ev.actor, 'd7=' + ev.atkRoll + ' 命中', 'float-info');
       floatOn(ev.target, '-' + ev.damage + (ev.downed ? ' 倒地' : ''), 'float-damage');
       flashCard(ev.target);
+    } else if (ev.kind === 'move') {
+      floatOn(ev.actor, '移动', 'float-info');
+    } else if (ev.kind === 'blocked') {
+      floatOn(ev.actor, '无法移动', 'float-info');
     }
     appendLog();
   }
@@ -462,8 +487,7 @@
     renderedLogCount = 0;
     cardRefs = {};
     chipRefs = {};
-    $('human-grid').innerHTML = '';
-    $('zombie-grid').innerHTML = '';
+    $('battle-grid').innerHTML = '';
     $('order-strip').innerHTML = '';
     $('battle-log').innerHTML = '';
     $('battle-banner').hidden = true;

@@ -1985,7 +1985,7 @@ function main() {
     }
     checkEq(GE.validateConfig(cfg), [], '10c: placement=split は正当な設定');
   }
-  // 10d. pos の値语义: stepBattle は入力 state の pos を含めて一切破壊しない
+  // 10d. pos の値セマンティクス: stepBattle は入力 state の pos を含めて一切破壊しない
   {
     const { state: s0 } = makeState({
       pos: [{ row: 1, col: 1 }, { row: 1, col: 9 }], // 隣接しない 1v1 → 先手は移動
@@ -2005,7 +2005,7 @@ function main() {
     checkEq(res.state.members[0].pos, { row: 1, col: 2 }, '10d: state の pos は移動先に更新');
     checkEq(manhattan(res.event.from, res.event.to), 1, '10d: 移動は 1 マス');
     check(res.state.members[0].pos !== res.event.from && res.event.to !== res.event.from,
-      '10d: pos と event は参照を共有しない（値语义）');
+      '10d: pos と event は参照を共有しない（値セマンティクス）');
   }
 
   // =============================================== 11) 行動規則（隣接攻撃・移動選路）
@@ -2192,6 +2192,37 @@ function main() {
       '2. 玩家2（d100=80→10→95）（2,3）',
       '3. 玩家1（d100=80→10→5）（1,2）',
     ], '11h: 順序表は重投序列の後に行尾座標を付す（逐字）');
+  }
+
+  // 11i. 行動順の末尾で四面皆阻 → blocked 行＋折り返し round 行の 2 行追記。
+  //      11e は行動順の先頭で受阻するため追記 1 行で、stepOk の
+  //      「追記 2 行目は折り返し round 行」経路が 223 戦圧測でも 0 回だった
+  //      （blocked 事象が発生しない）ため、ここで実動保証する。
+  {
+    const s = placedState(
+      {
+        human: { count: 3, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
+        zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      },
+      [{ row: 1, col: 1 }, { row: 1, col: 2 }, { row: 2, col: 1 }, { row: 9, col: 9 }],
+      [10, 90, 80, 40]); // 順序: 玩家2(90)→玩家3(80)→丧尸1(40)→玩家1(10)。玩家1 が末尾
+    checkEq(s.order[s.order.length - 1], '玩家1', '11i: 玩家1 は行動順の末尾');
+    s.turnIndex = s.order.length - 1; // 玩家1 の番へ（開戦直後は先頭のため）
+    const rs = new RngScript(); // 1 回でも乱数を使ったら例外で落ちる
+    const lenBefore = s.log.length;
+    const r = GE.stepBattle(s, rs.rng);
+    checkEq(rs.used, 0, '11i: 末尾での受阻も乱数を消費しない');
+    checkEq(r.event.kind, 'blocked', '11i: event は blocked');
+    checkEq(r.event.actor, '玩家1', '11i: event.actor は 玩家1');
+    checkEq(r.state.turnIndex, 0, '11i: 順序は折り返して先頭へ');
+    checkEq(r.state.round, s.round + 1, '11i: round は +1');
+    checkEq(r.state.log.length, lenBefore + 2, '11i: blocked 行＋round 行の 2 行追記');
+    checkEq(r.state.log[lenBefore].type, 'action-blocked', '11i: 追記 1 行目は action-blocked');
+    checkEq(r.state.log[lenBefore].text, '玩家1 无法移动（无路可走）', '11i: 移動不能行の逐字');
+    checkEq(r.state.log[lenBefore + 1].type, 'round', '11i: 追記 2 行目は折り返し round 行');
+    checkEq(r.state.log[lenBefore + 1].text, '── 第 ' + (s.round + 1) + ' 轮 ──', '11i: round 行の逐字');
+    const verdict = stepOk(s, r.state, r.event);
+    checkEq(verdict.ok, true, '11i: stepOk が末尾受阻ステップを通る: ' + verdict.diag);
   }
 
   console.log('[progress] grid rules done, failures=' + failures.length);

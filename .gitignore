@@ -1,2 +1,7 @@
 # AI agent workspace files (workflow drafts, machine-owned)
 .zcode/
+
+# transient verify run outputs (regenerable)
+verify/run.log
+verify/battle-log-dump.txt
+verify/e2e-findings.json

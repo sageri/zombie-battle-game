@@ -2720,6 +2720,10 @@ function runStaticGuardChecks() {
     '注们', 'f0: html プローブ（<!-- --> のみ）');
   checkEq(extractComments('a{content:"语"}/* 简语 */', 'css').join('|'),
     '简语', 'f0: css プローブ（content 文字列は除外）');
+  checkEq(countOccurrences('inside reconsider; the turn order here', 'side'), 0,
+    'f0: ASCII 語の単語境界（inside/consider は side に数えない）');
+  checkEq(countOccurrences('inside reconsider; the turn order here', 'turn order'), 1,
+    'f0: ASCII 語は境界一致のみ数える');
 
   // ---- 走査対象の読み込み ----
   const contextText = readFileSync(path.resolve(here, '..', 'CONTEXT.md'), 'utf8');

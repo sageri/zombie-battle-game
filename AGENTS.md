@@ -33,3 +33,17 @@
 ## 语言
 
 - 代码注释：日文。界面文案与战斗日志：简体中文。README：简体中文。提交标题：英文 Conventional Commits（与现有历史一致）。
+
+## Agent skills
+
+### Issue tracker
+
+Issues 跟踪在 GitHub Issues（gh CLI）。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用五个默认 triage 标签（needs-triage / needs-info / ready-for-agent / ready-for-human / wontfix）。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文：术语表是根目录 `CONTEXT.md`（本仓不用 GLOSSARY.md），ADR 在 `docs/adr/`。见 `docs/agents/domain.md`。

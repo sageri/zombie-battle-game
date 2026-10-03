@@ -32,6 +32,9 @@
 //       UI 流程テスト（画面切替・設定ロック/解放・9×9 戦場グリッドと
 //       カード transform の同期・逐次演出の飄字/血条/ログ同期・速度 3 段階
 //       切替・跳到結果・重置・一键清空・終局横幅）
+//   (f) 静的ガード: 用語（CONTEXT.md の _Avoid_ 語は基線 verify/term-baseline.json
+//       を超えない）・src/ コメントの簡体字専用字（同基線管理）・verify/*.mjs の
+//       絶対パス（出現即失敗）。
 //
 // 出力: 最終行に必ず RESULT {"assertions":N,"failures":[...]} を出す。
 //       全件パスなら exit 0、失敗があれば exit 1。
@@ -39,7 +42,7 @@
 // 仕様参照: src/engine.js 冒頭の GameEngine/GameUI API コメント塊、
 //           src/engine.js・src/ui.js の実装本体、docs/adr/0001・0002。
 // ======================================================================
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
@@ -2563,6 +2566,266 @@ function main() {
     checkEq(GUI.getMode(), 'idle', 'UI テストは idle で終わる');
     console.log('[progress] UI flow done, failures=' + failures.length);
   }
+
+  runStaticGuardChecks();
+}
+
+// ============================================================ (f) 静的ガード
+// 3 つの静的検査を門禁に組み込む（レビュー段階の目視検査を機械検査へ置換）:
+//   f-1 用語: CONTEXT.md の _Avoid_ 語を README.md・CONTEXT.md（_Avoid_ 行自身を
+//       除く）・src/ 配下全文で数え、基線 verify/term-baseline.json を超えたら
+//       失敗。減る分は自由（「存量は main 現状を基線に、減らすのみ」と同じ語義）。
+//       純 CJK 語は部分一致、ASCII を含む語（turn order 等）は単語境界で数える。
+//   f-2 簡体字専用字: src/ の JS/HTML/CSS コメント文中の出現を基線管理する
+//       （コメントは日本語という規約の機械検査）。
+//   f-3 絶対パス: verify/*.mjs のソース本文に、リポジトリ所在や盤符に依存する
+//       絶対パス（図式は ABS_PATH_RES 参照。C: 直下の CS/PY 経路と、file:/// の
+//       直後に盤符が来る URL）が出たら即失敗（45e0b9d と同種の回帰を捕まえる）。
+// UPDATE_BASELINE=1: (a)-(e) が全緑のときだけ実測値で基線を書き直す。書き直し
+//   自体が明示的な免除決定のため静的検査が赤でも構わない（新語の基線登録や
+//   意図的な免除はこの経路で行う）。(a)-(e) が赤いときは拒否する（テストの赤を
+//   基線書き換えで握り潰すのを防ぐ）。
+const GUARD_BASELINE_PATH = path.join(here, 'term-baseline.json');
+
+// 簡体字専用字表 = 簡体字候補 − 日本語常用漢字（常用漢字表・JIS X 0208）。
+// 1 字ずつ差分確認済み。日本語でも使う字は除外する:
+//   后(皇后) 与(与える) 将(将棋) 点(点数) 数(数値) 体 会 断 国(国語) 号(記号)
+//   随(随分) 高 静 等。誤検出ゼロを優先し、網羅は目指さない（足す場合は
+//   まず常用漢字表に無いことを確認する）。
+const ZH_ONLY_CHARS = [
+  '们', '说', '义', '语', '这', '对', '时', '处', '边', '别',
+  '请', '还', '见', '现', '觉', '发', '为', '车', '东', '门',
+  '问', '过', '单', '种', '转', '经', '动', '长', '伤', '响',
+  '满', '让', '变', '读', '继', '级', '势', '值', '优', '传',
+  '众', '侧', '简', '块', '库', '应', '开', '关', '红', '绿',
+  '蓝', '战', '执', '扩', '换', '阵', '华', '岁', '备', '复',
+  '类', '紧', '确', '认', '证', '钱', '队', '阶', '难', '项',
+  '顿', '预', '风', '飞', '驱', '骤'
+];
+
+// 絶対パス検査の図式定義区。本検査は engine.test.mjs 自身も走査するため、
+// 図式のリテラルが自己一致して自爆しないよう、行マーカーだけで Standalone な
+// 2 行に挟まれた区間を走査から除外する（マーカー行は trim() が完全一致した
+// 場合のみ区切りとみなす。const 定義行は引用符を含むため一致しない）。
+const ABS_GUARD_BEGIN = '/* abs-guard: pattern-literals begin */';
+const ABS_GUARD_END = '/* abs-guard: pattern-literals end */';
+/* abs-guard: pattern-literals begin */
+const ABS_PATH_RES = [
+  /C:[\\/]+CS[\\/]+PY/i,
+  /file:\/\/\/[A-Za-z]:\//
+];
+/* abs-guard: pattern-literals end */
+
+// CONTEXT.md の _Avoid_ 行から禁則語を取出す（語彙表が単一情報源）。
+function parseAvoidWords(contextText) {
+  const words = new Set();
+  for (const line of contextText.split(/\r?\n/)) {
+    if (!/^_Avoid_:/.test(line)) continue;
+    for (const w of line.slice('_Avoid_:'.length).split(/[、,，]/)) {
+      const t = w.trim();
+      if (t) words.add(t);
+    }
+  }
+  return [...words];
+}
+
+// 出現数計数: 純 CJK 語は部分一致。ASCII を含む語は単語境界（前後が
+// [A-Za-z0-9_] でない位置）で数える（inside/consider が side に誤計上されない）。
+function countOccurrences(text, word) {
+  if (!/[A-Za-z]/.test(word)) return text.split(word).length - 1;
+  const re = new RegExp('(?<![A-Za-z0-9_])'
+    + word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9_])', 'g');
+  return (text.match(re) || []).length;
+}
+
+function listFilesRecursive(dir) {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    const p = path.join(dir, name);
+    if (statSync(p).isDirectory()) out.push(...listFilesRecursive(p));
+    else out.push(p);
+  }
+  return out;
+}
+
+// 単一パスの字句状態機械: code/string/line/block を排他遷移させ、コメント文
+// だけを返す。「先に文字列を剥ぐ二段正規」はコメント内の引用符を誤処理する
+// ため採らない。識別できないものはすべて code 扱い（保守方針: コードをコメ
+// ントや文字列に誤仕分けしない — 誤仕分けは偽陽性ではなく検出漏れ側に倒れる）。
+// kind は 'js' | 'css' | 'html'。html は <!-- --> のみ、css は /* */ のみを
+// コメントとし、js は // と /* */ と 3 種の引用符を扱う。
+function extractComments(source, kind) {
+  let state = 'code', quote = '';
+  let buf = '', i = 0;
+  const out = [];
+  const flush = () => { const t = buf.trim(); if (t) out.push(t); buf = ''; };
+  while (i < source.length) {
+    if (state === 'code') {
+      if (kind === 'html') {
+        if (source.slice(i, i + 4) === '<!--') { state = 'block'; i += 4; continue; }
+        i++; continue;
+      }
+      const twoChars = source.slice(i, i + 2);
+      if (twoChars === '/*') { state = 'block'; i += 2; continue; }
+      if (kind === 'js' && twoChars === '//') { state = 'line'; i += 2; continue; }
+      const c = source[i];
+      if (c === '"' || c === "'" || c === '`') { state = 'string'; quote = c; i++; continue; }
+      i++; continue;
+    }
+    if (state === 'string') {
+      if (source[i] === '\\') { i += 2; continue; }
+      if (source[i] === quote) state = 'code';
+      i++; continue;
+    }
+    if (state === 'line') {
+      if (source[i] === '\n') { state = 'code'; flush(); }
+      else buf += source[i];
+      i++; continue;
+    }
+    // state === 'block'
+    const endTok = kind === 'html' ? '-->' : '*/';
+    if (source.slice(i, i + endTok.length) === endTok) {
+      state = 'code'; flush(); i += endTok.length; continue;
+    }
+    buf += source[i];
+    i++;
+  }
+  flush();
+  return out;
+}
+
+// 自己走査自爆防止: 行トリムがマーカーと完全一致する行で挟まれた区間を削る。
+function cutGuardRegion(text) {
+  const out = [];
+  let skipping = false;
+  for (const ln of text.split('\n')) {
+    const t = ln.trim();
+    if (t === ABS_GUARD_BEGIN) { skipping = true; continue; }
+    if (t === ABS_GUARD_END) { skipping = false; continue; }
+    if (!skipping) out.push(ln);
+  }
+  return out.join('\n');
+}
+
+function runStaticGuardChecks() {
+  const updateBaseline = process.env.UPDATE_BASELINE === '1';
+  // (a)-(e) 緑判定: 本関数は main() の末尾で呼ばれるので、この時点で failures
+  // が空 ＝ 静的検査以外の全アサーションが緑。
+  const coreGreen = failures.length === 0;
+
+  // ---- f0: 字句状態機械のセルフプローブ（期待値は手書きの独立値） ----
+  checkEq(extractComments("var a = '们外'; // 注释们\n/* 块们 */ var b = 2;", 'js').join('|'),
+    '注释们|块们', 'f0: js プローブ（文字列内は除外・行/塊コメントを取出す）');
+  checkEq(extractComments('<p>文</p>\n<!-- 注们 -->', 'html').join('|'),
+    '注们', 'f0: html プローブ（<!-- --> のみ）');
+  checkEq(extractComments('a{content:"语"}/* 简语 */', 'css').join('|'),
+    '简语', 'f0: css プローブ（content 文字列は除外）');
+
+  // ---- 走査対象の読み込み ----
+  const contextText = readFileSync(path.resolve(here, '..', 'CONTEXT.md'), 'utf8');
+  const readmeText = readFileSync(path.resolve(here, '..', 'README.md'), 'utf8');
+  const srcFiles = listFilesRecursive(path.resolve(here, '..', 'src'));
+  const contextScanned = contextText.split(/\r?\n/)
+    .filter((l) => !/^_Avoid_:/.test(l)).join('\n');
+
+  const words = parseAvoidWords(contextText);
+  check(words.length >= 1, 'f0: CONTEXT.md から _Avoid_ 語が取得できる');
+
+  const termText = [readmeText, contextScanned]
+    .concat(srcFiles.map((f) => readFileSync(f, 'utf8'))).join('\n');
+  const measuredTerms = {};
+  for (const w of words) measuredTerms[w] = countOccurrences(termText, w);
+
+  const commentParts = [];
+  for (const f of srcFiles) {
+    const kind = f.endsWith('.html') ? 'html' : f.endsWith('.css') ? 'css' : 'js';
+    commentParts.push(...extractComments(readFileSync(f, 'utf8'), kind));
+  }
+  const commentText = commentParts.join('\n');
+  const measuredChars = {};
+  for (const ch of ZH_ONLY_CHARS) {
+    measuredChars[ch] = commentText.split(ch).length - 1;
+  }
+
+  // ---- 基線の読み込み（無ければ空扱い。初回は UPDATE_BASELINE=1 で生成） ----
+  let baseline = { terms: {}, zhCommentChars: {} };
+  let baselineExists = true;
+  try {
+    baseline = JSON.parse(readFileSync(GUARD_BASELINE_PATH, 'utf8'));
+  } catch {
+    baselineExists = false;
+  }
+  if (!baselineExists && !updateBaseline) {
+    console.log('[guard] 基線ファイル verify/term-baseline.json が無い（空として扱う）。'
+      + '初回は UPDATE_BASELINE=1 node verify/engine.test.mjs で生成する');
+  }
+
+  // ---- UPDATE_BASELINE=1: (a)-(e) 緑のときだけ実測値で書き直す ----
+  if (updateBaseline) {
+    if (coreGreen) {
+      const sortedObj = (o) => Object.fromEntries(
+        Object.keys(o).sort().map((k) => [k, o[k]]));
+      const next = { terms: sortedObj(measuredTerms), zhCommentChars: sortedObj(measuredChars) };
+      const old = baselineExists ? baseline : { terms: {}, zhCommentChars: {} };
+      for (const section of ['terms', 'zhCommentChars']) {
+        const oldSec = old[section] || {};
+        for (const k of Object.keys(next[section])) {
+          if (next[section][k] !== oldSec[k]) {
+            console.log('[guard] baseline ' + section + ' ' + k + ': '
+              + (oldSec[k] === undefined ? '(none)' : oldSec[k]) + ' -> ' + next[section][k]);
+          }
+        }
+      }
+      writeFileSync(GUARD_BASELINE_PATH, JSON.stringify(next, null, 2) + '\n', 'utf8');
+      baseline = next;
+      console.log('[guard] baseline rewritten (UPDATE_BASELINE=1)');
+    } else {
+      console.log('[guard] UPDATE_BASELINE=1 refused: (a)-(e) has '
+        + failures.length + ' failure(s) — fix them first');
+    }
+  }
+
+  // ---- f-1 用語: 基線超過は失敗、基線未満は締め付け可能を表示 ----
+  for (const w of words) {
+    const base = (baseline.terms && typeof baseline.terms[w] === 'number')
+      ? baseline.terms[w] : 0;
+    if (measuredTerms[w] > base) {
+      check(false, 'f1: 用語「' + w + '」出現 ' + measuredTerms[w] + ' > 基線 ' + base
+        + '（_Avoid_ 語は増やせない。意図的なら UPDATE_BASELINE=1 で基線を更新する）');
+    } else {
+      check(true, 'f1: 用語「' + w + '」' + measuredTerms[w] + ' <= 基線 ' + base);
+      if (measuredTerms[w] < base) {
+        console.log('[guard] 締め付け可能: 語「' + w + '」'
+          + measuredTerms[w] + ' < 基線 ' + base);
+      }
+    }
+  }
+
+  // ---- f-2 簡体字専用字（src/ コメントは日本語） ----
+  for (const ch of ZH_ONLY_CHARS) {
+    const base = (baseline.zhCommentChars && typeof baseline.zhCommentChars[ch] === 'number')
+      ? baseline.zhCommentChars[ch] : 0;
+    if (measuredChars[ch] > base) {
+      check(false, 'f2: src/ コメントの簡体字専用字「' + ch + '」出現 '
+        + measuredChars[ch] + ' > 基線 ' + base
+        + '（コメントは日本語で書く。意図的なら UPDATE_BASELINE=1）');
+    } else {
+      check(true, 'f2: 簡体字専用字「' + ch + '」' + measuredChars[ch] + ' <= 基線 ' + base);
+    }
+  }
+
+  // ---- f-3 絶対パス（出現即失敗・基線なし） ----
+  for (const f of readdirSync(here)) {
+    if (!f.endsWith('.mjs')) continue;
+    const text = cutGuardRegion(readFileSync(path.join(here, f), 'utf8'));
+    for (const re of ABS_PATH_RES) {
+      const hit = re.exec(text);
+      check(hit === null, 'f3: ' + f + ' に絶対パス無し（図式 ' + re.source + '）'
+        + (hit === null ? '' : ' — 一致: ' + JSON.stringify(hit[0])));
+    }
+  }
+
+  console.log('[progress] static guard done, failures=' + failures.length);
 }
 
 // ============================================================ 起動

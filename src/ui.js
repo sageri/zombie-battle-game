@@ -38,6 +38,10 @@
   };
   var SPEED_ORDER = ['slow', 'middle', 'fast'];
 
+  // 關鍵時刻演出の尺 ms（#16 規格。styles.css の --dur-shake / --dur-spot と
+  // 必ず一致させること。次拍の遅延增量の算出にだけ使う）
+  var FX_DUR = { shake: 400, spot: 900 };
+
   // ---- スケジューラ --------------------------------------------------
   // 既定: 実時間。テストは createSyncScheduler()（ポンプ式）へ差し替える。
   function createRealtimeScheduler() {
@@ -87,6 +91,7 @@
   var battleGen = 0;        // 戦闘ごとの代号（開戦/リセットで++、过期回调の無効化）
   var pendingTimer = null;  // 予約済みの次ステップ
   var renderedLogCount = 0; // 画面に描画済みの log 先頭数（追記描画用）
+  var firstContactSeen = false; // 初接戰（初の命中）をまだ演出していないか
   var cardRefs = {};        // 名前 → { card, emoji, fill, float }
   var chipRefs = {};        // 名前 → { chip, emoji }
 
@@ -369,6 +374,22 @@
     $('intent-layer').appendChild(svg);
   }
 
+  // ---- 關鍵時刻演出（#16 規格）----------------------------------------
+  // すべて「クラス付与 + CSS アニメの自己完結」で表現し、JS タイマーは
+  // 一切使わない（1 pump == 1 step の不変量を守るため）。再始動は
+  // 付け外し + 強制リフローで行う（飄字の flashCard と同じ方式）
+  function retriggerFx(el, cls) {
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+  }
+
+  function clearStageFx() {
+    $('battlefield').classList.remove('fx-shake', 'fx-freeze');
+    $('fx-redge').classList.remove('on');
+    $('fx-spot').classList.remove('on');
+  }
+
   // ---- 戦闘ログ ------------------------------------------------------
 
   // まだ描画していないログ行だけを追記し、最下部へ自動スクロールする
@@ -448,25 +469,31 @@
       finishBattle();
       return;
     }
-    applyEvent(res.event);
+    var fxMs = applyEvent(res.event);
     if (state.finished) {
       finishBattle();
     } else {
-      scheduleNext(SPEEDS[speedKey].delay);
+      // 關鍵拍は演出尺が基本遅延に追いつくまで次拍の待ちを延ばす
+      // （尺 ≤ 基本遅延なら增量 0。予約は常に 1 件なので pump 不変量は守られる）
+      var base = SPEEDS[speedKey].delay;
+      scheduleNext(base + Math.max(0, fxMs - base));
     }
   }
 
   // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・日志）。
   // move は updateCards の transform 更新だけで滑り移動が表現され、
-  // blocked はカードの動きなしでログだけが残る（いずれも通常の速度遅延で進む）
+  // blocked はカードの動きなしでログだけが残る。戻り値はこの拍で始動した
+  // 關鍵時刻演出の尺 ms（なければ 0。doStep が次拍の遅延に加算する）
   function applyEvent(ev) {
     clearFloats();
     clearIntent();
+    clearStageFx();
     updateCards();
     updatePowerPane();
     var activeName = ev.actor || null;
     updateStrip(activeName);
     setCurrentMarker(activeName);
+    var fxMs = 0;
     if (ev.kind === 'fail') {
       floatOn(ev.actor, 'd7=' + ev.atkRoll + ' 攻击失手', 'float-info');
     } else if (ev.kind === 'dodge') {
@@ -475,6 +502,18 @@
       floatOn(ev.actor, 'd7=' + ev.atkRoll + ' 命中', 'float-info');
       floatOn(ev.target, '-' + ev.damage + (ev.downed ? ' 倒地' : ''), 'float-damage');
       flashCard(ev.target);
+      if (!firstContactSeen) {
+        // 初接戰（初めてダメージが入った拍）: 震屏＋紅暈。以後の命中では再演しない
+        firstContactSeen = true;
+        retriggerFx($('battlefield'), 'fx-shake');
+        retriggerFx($('fx-redge'), 'on');
+        fxMs = FX_DUR.shake;
+      }
+      if (ev.downed) {
+        // 倒地: 聚光暗場
+        retriggerFx($('fx-spot'), 'on');
+        if (FX_DUR.spot > fxMs) fxMs = FX_DUR.spot;
+      }
     } else if (ev.kind === 'move') {
       floatOn(ev.actor, '移动', 'float-info');
       var mover = memberByName(ev.actor);
@@ -483,9 +522,10 @@
       floatOn(ev.actor, '无法移动', 'float-info');
     }
     appendLog();
+    return fxMs;
   }
 
-  // 終局表示へ移る（順序帯の強調を外し、横幅を出す）
+  // 終局表示へ移る（順序帯の強調を外し、横幅を出す。終局の定格演出を添える）
   function finishBattle() {
     mode = 'done';
     pendingTimer = null;
@@ -495,6 +535,7 @@
     setCurrentMarker(null);
     clearFloats();
     clearIntent();
+    retriggerFx($('battlefield'), 'fx-freeze');
     $('btn-skip').disabled = true;
     appendLog();
     renderBanner();
@@ -513,10 +554,12 @@
     state = E.startBattle(config, rng);   // rng null → エンジン既定の Math.random
     setConfigEnabled(false);              // 開戦後は配置をロック（画面遷移と二重の保険）
     renderedLogCount = 0;
+    firstContactSeen = false;
     $('battle-log').innerHTML = '';
     $('battle-banner').hidden = true;
     $('btn-skip').disabled = false;
     clearIntent();
+    clearStageFx();
     buildCards();
     buildStrip();
     showScreen('battle');
@@ -551,10 +594,12 @@
     state = null;
     rng = null;
     renderedLogCount = 0;
+    firstContactSeen = false;
     cardRefs = {};
     chipRefs = {};
     $('battle-grid').innerHTML = '';
     $('intent-layer').innerHTML = '';
+    clearStageFx();
     $('order-strip').innerHTML = '';
     $('battle-log').innerHTML = '';
     $('battle-banner').hidden = true;

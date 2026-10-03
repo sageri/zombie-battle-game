@@ -2657,6 +2657,11 @@ function main() {
         checkEq(jNumZ.textContent, p0.zText, 'S1: 開戦直後の數值表記（喪屍）');
       }
       let jStep = 0;
+      const jFirstHitIdx = jEvents.findIndex((e) => e.kind === 'hit');
+      check(jFirstHitIdx >= 0, '9j: 初接戰（初の命中拍）が存在する');
+      const jBf = DOC.getElementById('battlefield');
+      const jRedge = DOC.getElementById('fx-redge');
+      const jSpot = DOC.getElementById('fx-spot');
       while (GUI.getMode() === 'live' && jStep < jStates.length) {
         spy.pump(1);
         jStep++;
@@ -2689,11 +2694,36 @@ function main() {
           checkEq(jIntent.children.length, 0,
             'S2(' + jStep + '): ' + ev.kind + ' 拍は意図層が空（blocked は描かない）');
         }
+        // S3: 關鍵時刻は「初接戰（初の命中拍）」「倒地」「終局」のみ。閃避・
+        // 通常伤害の拍には何の演出クラスも付かない。演出尺が基本遅延を超える
+        // 分だけ次拍の予約遅延が延びる（fast=300ms で検証する）
+        const shakeExpected = jStep === jFirstHitIdx + 1;
+        const spotExpected = ev.kind === 'hit' && ev.downed === true;
+        checkEq(jBf.classList.contains('fx-shake'), shakeExpected,
+          'S3(' + jStep + '): 震屏クラスは初接戰拍のみ');
+        checkEq(jRedge.classList.contains('on'), shakeExpected,
+          'S3(' + jStep + '): 紅暈クラスは初接戰拍のみ');
+        checkEq(jSpot.classList.contains('on'), spotExpected,
+          'S3(' + jStep + '): 聚光クラスは倒地拍のみ');
+        // 普通の閃避・伤害の拍それ自体は關鍵演出を起こさない（初接戰と
+        // 偶然重なった命中拍は除く — そこは「初接戰」の演出として成立つ）
+        if ((ev.kind === 'dodge' || (ev.kind === 'hit' && !ev.downed)) && !shakeExpected) {
+          check(!jBf.classList.contains('fx-shake') && !jSpot.classList.contains('on')
+            && !jBf.classList.contains('fx-freeze'),
+            'S3(' + jStep + '): 閃避・通常伤害の拍は關鍵演出を起こさない');
+        }
+        if (GUI.getMode() === 'live') {
+          const fxMs = Math.max(shakeExpected ? 400 : 0, spotExpected ? 900 : 0);
+          checkEq(spy.delays[spy.delays.length - 1], 300 + Math.max(0, fxMs - 300),
+            'S3(' + jStep + '): 次拍の予約遅延（fast 基本値 300 + 演出尺の超過分）');
+        }
       }
       checkEq(GUI.getMode(), 'done', '9j: 全拍完走で終局表示へ');
       checkEq(jStep, jStates.length - 1, '9j: UI の歩数が引擎連鎖と一致（1 pump == 1 step 不変）');
       checkEq(jIntent.children.length, 0, 'S2: 終局表示で意図層を掃除する');
+      checkEq(jBf.classList.contains('fx-freeze'), true, 'S3: 終局で定格クラスが付く');
       GUI.resetToConfig();
+      checkEq(jBf.classList.contains('fx-freeze'), false, 'S3: 重置で定格クラスを外す');
       checkEq(GUI.getMode(), 'idle', '9j: 検査後は idle へ戻す');
     }
 

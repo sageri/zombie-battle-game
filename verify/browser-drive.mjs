@@ -25,7 +25,8 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SHOT_DIR = join(ROOT, 'verify', 'screenshots');
 // スクリプト自身の位置から解決する（リポジトリ移動・他マシンでも成立）
 const PAGE_URL = pathToFileURL(join(ROOT, 'src', 'index.html')).href;
-const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+// 他マシンでは MSEDGE_PATH で上書きできる（未指定時は下記の本機既定パスを使う）。
+const EDGE = process.env.MSEDGE_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -559,6 +560,13 @@ async function main() {
     '--disable-gpu',
     'about:blank'
   ], { stdio: 'ignore' });
+  // Edge 起動失敗（パス誤り等）は非同期の error イベントで届く。放置すると
+  // 30 秒のポート待ちタイムアウトまで黙るため、即座に終了して原因を示す
+  // （コンソールは ASCII のみ出力する規約どおり）。
+  proc.on('error', (err) => {
+    console.error('EDGE_LAUNCH_FAILED: ' + String(err.message));
+    process.exit(2);
+  });
 
   const target = await findPageTarget(30000);
   cdp = await connectCdp(target.webSocketDebuggerUrl);

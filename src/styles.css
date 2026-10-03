@@ -141,6 +141,18 @@
     width: 576px; height: 576px;   /* 9×64px。CELL_PX と一致させること */
     pointer-events: none; z-index: 1; overflow: visible;
   }
+  /* 意図は拍の頭で掃き出されるまで残る（~1200ms のフェードが足跡の残影） */
+  .intent-svg { position: absolute; left: 0; top: 0; animation: intent-fade 1.2s ease-out forwards; }
+  .intent-svg line { stroke-width: 2; opacity: .8; fill: none; }
+  .intent-svg circle { fill: none; stroke-width: 1.5; opacity: .7; }
+  .intent-svg.intent-human line, .intent-svg.intent-human circle { stroke: #1a5fb4; }
+  .intent-svg.intent-zombie line, .intent-svg.intent-zombie circle { stroke: #a51d2d; }
+  @keyframes intent-fade {
+    0% { opacity: 0; }
+    15% { opacity: 1; }
+    70% { opacity: .8; }
+    100% { opacity: 0; }
+  }
   .fx-redge {
     position: absolute; inset: 0; border-radius: 4px;
     pointer-events: none; opacity: 0; z-index: 4;

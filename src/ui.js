@@ -333,6 +333,42 @@
     r.card.classList.add('hit-flash');
   }
 
+  // ---- 意図提示（#16 規格）--------------------------------------------
+  // move 拍だけ描く: 移動元→移動先への虛線と目標格の円環。座標は格中心の
+  // 純計算（getBoundingClientRect に依らないので描画結果が環境で変わらない）。
+  // 掃除は JS タイマーを使わず「次拍の頭で丸ごと掃除」（飄字と同じ方式。
+  // CSS 側の ~1200ms フェードが移動足跡の残影を兼ねる）
+  function clearIntent() {
+    $('intent-layer').innerHTML = '';
+  }
+
+  function drawIntent(from, to, faction) {
+    var NS = 'http://www.w3.org/2000/svg';
+    var size = GRID_SIZE * CELL_PX;
+    var x1 = (from.col - 0.5) * CELL_PX;
+    var y1 = (from.row - 0.5) * CELL_PX;
+    var x2 = (to.col - 0.5) * CELL_PX;
+    var y2 = (to.row - 0.5) * CELL_PX;
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'intent-svg intent-' + faction);
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    var line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', String(x1));
+    line.setAttribute('y1', String(y1));
+    line.setAttribute('x2', String(x2));
+    line.setAttribute('y2', String(y2));
+    line.setAttribute('stroke-dasharray', '6 7');
+    var ring = document.createElementNS(NS, 'circle');
+    ring.setAttribute('cx', String(x2));
+    ring.setAttribute('cy', String(y2));
+    ring.setAttribute('r', String(CELL_PX * 0.42));
+    ring.setAttribute('stroke-dasharray', '4 5');
+    svg.appendChild(line);
+    svg.appendChild(ring);
+    $('intent-layer').appendChild(svg);
+  }
+
   // ---- 戦闘ログ ------------------------------------------------------
 
   // まだ描画していないログ行だけを追記し、最下部へ自動スクロールする
@@ -425,6 +461,7 @@
   // blocked はカードの動きなしでログだけが残る（いずれも通常の速度遅延で進む）
   function applyEvent(ev) {
     clearFloats();
+    clearIntent();
     updateCards();
     updatePowerPane();
     var activeName = ev.actor || null;
@@ -440,6 +477,8 @@
       flashCard(ev.target);
     } else if (ev.kind === 'move') {
       floatOn(ev.actor, '移动', 'float-info');
+      var mover = memberByName(ev.actor);
+      if (mover) drawIntent(ev.from, ev.to, mover.faction);
     } else if (ev.kind === 'blocked') {
       floatOn(ev.actor, '无法移动', 'float-info');
     }
@@ -455,6 +494,7 @@
     updateStrip(null);
     setCurrentMarker(null);
     clearFloats();
+    clearIntent();
     $('btn-skip').disabled = true;
     appendLog();
     renderBanner();
@@ -476,6 +516,7 @@
     $('battle-log').innerHTML = '';
     $('battle-banner').hidden = true;
     $('btn-skip').disabled = false;
+    clearIntent();
     buildCards();
     buildStrip();
     showScreen('battle');
@@ -513,6 +554,7 @@
     cardRefs = {};
     chipRefs = {};
     $('battle-grid').innerHTML = '';
+    $('intent-layer').innerHTML = '';
     $('order-strip').innerHTML = '';
     $('battle-log').innerHTML = '';
     $('battle-banner').hidden = true;

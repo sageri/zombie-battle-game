@@ -120,6 +120,7 @@ function makeFakeElement(tag, id, onRegister) {
     children: [],
     listeners: {},
     style: {},
+    attrs: {},
     textContent: '',
     innerHTML: '',
     value: '',
@@ -150,9 +151,10 @@ function makeFakeElement(tag, id, onRegister) {
     removeChild() { return null; },
     querySelector() { return makeFakeElement('div'); },
     querySelectorAll() { return []; },
-    setAttribute() {},
-    getAttribute() { return null; },
-    removeAttribute() {},
+    // 屬性は實裝どおり文字列で保持する（意図 SVG の座標検査に必要）
+    setAttribute(k, v) { store.attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(store.attrs, k) ? store.attrs[k] : null; },
+    removeAttribute(k) { delete store.attrs[k]; },
     focus() {}, blur() {}, click() {},
     contains() { return false; },
     getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
@@ -203,6 +205,10 @@ function makeDocumentStub() {
     // createElement で作った要素に id が付いたら document に登録する
     //（実 DOM と同じく getElementById で同じ要素が取れるようにするため）
     createElement(tag) {
+      return makeFakeElement(tag, '', function (vid, el) { byId.set(vid, el); });
+    },
+    // SVG 用（ui.js の意図提示が使う。id 登録の挙動は createElement と同じ）
+    createElementNS(ns, tag) {
       return makeFakeElement(tag, '', function (vid, el) { byId.set(vid, el); });
     },
     createDocumentFragment() { return makeFakeElement('#document-fragment'); },
@@ -2641,6 +2647,8 @@ function main() {
       const jFillZ = DOC.getElementById('power-fill-zombie');
       const jNumH = DOC.getElementById('power-num-human');
       const jNumZ = DOC.getElementById('power-num-zombie');
+      const jIntent = DOC.getElementById('intent-layer');
+      checkEq(jIntent.children.length, 0, 'S2: 開戦直後の意図層は空');
       {
         const p0 = powerPctOf(jStates[0]);
         checkEq(jFillH.style.width, p0.human + '%', 'S1: 開戦直後の態勢條（人類）');
@@ -2657,10 +2665,34 @@ function main() {
         checkEq(jFillH.style.width, p.human + '%', 'S1(' + jStep + '): 態勢條の幅（人類）');
         checkEq(jFillZ.style.width, p.zombie + '%', 'S1(' + jStep + '): 態勢條の幅（喪屍）');
         checkEq(jNumH.textContent, p.hText, 'S1(' + jStep + '): 態勢條の數值（人類）');
-        checkEq(jNumZ.textContent, p.zText, 'S1(' + jStep + '): 態勢條的數值（喪屍）');
+        checkEq(jNumZ.textContent, p.zText, 'S1(' + jStep + '): 態勢條の數值（喪屍）');
+        // S2: move 拍だけ意図 SVG を描き、それ以外の拍（blocked を含む）は空。
+        // 座標は「格中心 = (col-0.5)*64」の独立算例と突き合わせる
+        const ev = jEvents[jStep - 1];
+        if (ev.kind === 'move') {
+          checkEq(jIntent.children.length, 1, 'S2(' + jStep + '): move 拍は意図 SVG を 1 枚');
+          const svg = jIntent.children[0];
+          check(svg.tagName.toUpperCase() === 'SVG', 'S2(' + jStep + '): 意図は SVG 要素');
+          const line = svg.children[0];
+          const ring = svg.children[1];
+          checkEq(Number(line.getAttribute('x1')), (ev.from.col - 0.5) * 64, 'S2(' + jStep + '): 虛線の始点 x（from 格中心）');
+          checkEq(Number(line.getAttribute('y1')), (ev.from.row - 0.5) * 64, 'S2(' + jStep + '): 虛線の始点 y');
+          checkEq(Number(line.getAttribute('x2')), (ev.to.col - 0.5) * 64, 'S2(' + jStep + '): 虛線の終点 x（to 格中心）');
+          checkEq(Number(line.getAttribute('y2')), (ev.to.row - 0.5) * 64, 'S2(' + jStep + '): 虛線の終点 y');
+          check(!!line.getAttribute('stroke-dasharray'), 'S2(' + jStep + '): 方向線は虛線（dasharray 屬性）');
+          checkEq(Number(ring.getAttribute('cx')), (ev.to.col - 0.5) * 64, 'S2(' + jStep + '): 目標円環の中心 x');
+          checkEq(Number(ring.getAttribute('cy')), (ev.to.row - 0.5) * 64, 'S2(' + jStep + '): 目標円環の中心 y');
+          const jActorFaction = (st.members.find((mm) => mm.name === ev.actor) || {}).faction;
+          check((svg.getAttribute('class') || '').indexOf('intent-' + jActorFaction) >= 0,
+            'S2(' + jStep + '): 意図は行動者陣営の色クラス');
+        } else {
+          checkEq(jIntent.children.length, 0,
+            'S2(' + jStep + '): ' + ev.kind + ' 拍は意図層が空（blocked は描かない）');
+        }
       }
       checkEq(GUI.getMode(), 'done', '9j: 全拍完走で終局表示へ');
       checkEq(jStep, jStates.length - 1, '9j: UI の歩数が引擎連鎖と一致（1 pump == 1 step 不変）');
+      checkEq(jIntent.children.length, 0, 'S2: 終局表示で意図層を掃除する');
       GUI.resetToConfig();
       checkEq(GUI.getMode(), 'idle', '9j: 検査後は idle へ戻す');
     }

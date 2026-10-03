@@ -2422,9 +2422,11 @@ function main() {
         checkEq(transformOf(ev.actor), transformFor(ev.to), '移動後のカード位置が ev.to と一致');
         const mv = refStates[uiSteps].members.find(m => m.name === ev.actor);
         checkEq(transformOf(ev.actor), transformFor(mv.pos), '移動後のカード位置が state pos と一致');
+        // 移動行のクラスは種別＋陣営色（#16: 行動行は陣営色を帯びる）
         checkEq(DOC.getElementById('battle-log')
-          .children[refStates[uiSteps].log.length - 1].className, 'log-action-move',
-          '移動歩のログ行は log-action-move');
+          .children[refStates[uiSteps].log.length - 1].className,
+          'log-action-move log-' + mv.faction,
+          '移動歩のログ行は log-action-move＋行動者陣営色');
       }
     }
     checkEq(GUI.getMode(), 'done', '全ステップ演出で終局表示へ');
@@ -2659,6 +2661,9 @@ function main() {
       let jStep = 0;
       const jFirstHitIdx = jEvents.findIndex((e) => e.kind === 'hit');
       check(jFirstHitIdx >= 0, '9j: 初接戰（初の命中拍）が存在する');
+      // ログは追記専用なので行番号はどの state でも同一（終局 log で定まる）
+      const jFirstHitRowIdx = jStates[jStates.length - 1].log.findIndex((e) => e.type === 'action-hit');
+      check(jFirstHitRowIdx >= 0, '9j: 初接戰行（初の命中行）が存在する');
       const jBf = DOC.getElementById('battlefield');
       const jRedge = DOC.getElementById('fx-redge');
       const jSpot = DOC.getElementById('fx-spot');
@@ -2716,6 +2721,25 @@ function main() {
           const fxMs = Math.max(shakeExpected ? 400 : 0, spotExpected ? 900 : 0);
           checkEq(spy.delays[spy.delays.length - 1], 300 + Math.max(0, fxMs - 300),
             'S3(' + jStep + '): 次拍の予約遅延（fast 基本値 300 + 演出尺の超過分）');
+        }
+        // S4: 三級分層 — 關鍵行（倒地/初接戰/終局）は log-key、行動行は陣営色、
+        // 本文と log-<type> 判定は不變。期待値は log 原文から独立に組み立てる
+        const jLogBox = DOC.getElementById('battle-log');
+        const prevLogLen = jStates[jStep - 1].log.length;
+        for (let li = prevLogLen; li < st.log.length; li++) {
+          const entry = st.log[li];
+          const row = jLogBox.children[li];
+          const expParts = ['log-' + entry.type];
+          const isHitRow = entry.type === 'action-hit';
+          if (entry.type === 'victory' || (isHitRow && (li === jFirstHitRowIdx || entry.text.indexOf('，倒地！') >= 0))) {
+            expParts.push('log-key');
+          }
+          const actorName = entry.text.split(' → ')[0].split(' 移动：')[0].split(' 无法移动')[0];
+          const actorMember = jStates[0].members.find((mm) => mm.name === actorName);
+          if (actorMember) expParts.push('log-' + actorMember.faction);
+          checkEq(row.className, expParts.join(' '),
+            'S4(' + jStep + '/' + li + '): ログ行の三級クラス');
+          checkEq(row.textContent, entry.text, 'S4(' + jStep + '/' + li + '): 本文は一字一句不變');
         }
       }
       checkEq(GUI.getMode(), 'done', '9j: 全拍完走で終局表示へ');

@@ -243,3 +243,11 @@
   .log-action-move { color: #5a7d5a; }
   .log-action-blocked { color: #b26a00; }
   .log-victory { font-weight: bold; color: #1a7f37; margin-top: 6px; }
+  /* 三級分層（#16）: 行動行は左枠で陣営色を示し、關鍵行は強調する */
+  .log > div { border-left: 2px solid transparent; padding-left: 6px; }
+  .log-human { border-left-color: #1a5fb4; }
+  .log-zombie { border-left-color: #a51d2d; }
+  .log-key {
+    font-weight: bold; color: #8a5a00; background: #fff6df;
+    border-left-color: #e8a33d;
+  }

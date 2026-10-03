@@ -92,6 +92,7 @@
   var pendingTimer = null;  // 予約済みの次ステップ
   var renderedLogCount = 0; // 画面に描画済みの log 先頭数（追記描画用）
   var firstContactSeen = false; // 初接戰（初の命中）をまだ演出していないか
+  var firstHitRowLogged = false; // 初接戰行（初の命中行）をまだ描いていないか
   var cardRefs = {};        // 名前 → { card, emoji, fill, float }
   var chipRefs = {};        // 名前 → { chip, emoji }
 
@@ -392,7 +393,18 @@
 
   // ---- 戦闘ログ ------------------------------------------------------
 
-  // まだ描画していないログ行だけを追記し、最下部へ自動スクロールする
+  // 行動行の行動者名を行頭から取り出す（区切りは引擎の書式リテラルと同一。
+  // 「→」だけの重投履歴や座標の「）→（」は空色区切り ' → ' に一致しない）
+  function actorOfLogText(text) {
+    var i = text.indexOf(' → ');
+    if (i < 0) i = text.indexOf(' 移动：');
+    if (i < 0) i = text.indexOf(' 无法移动');
+    return i >= 0 ? text.slice(0, i) : null;
+  }
+
+  // まだ描画していないログ行だけを追記し、最下部へ自動スクロールする。
+  // 三級分層（#16 規格）: 關鍵行（倒地/初接戰/終局）に log-key、行動行に陣営色を
+  // 追加する。本文と log-<type> の判定は凍結面なので觸れない
   function appendLog() {
     if (!state || renderedLogCount >= state.log.length) return;
     var box = $('battle-log');
@@ -400,9 +412,19 @@
     for (var i = renderedLogCount; i < state.log.length; i++) {
       var e = state.log[i];
       var div = document.createElement('div');
-      div.className = 'log-' + e.type;
+      var cls = 'log-' + e.type;
+      var isHitRow = e.type === 'action-hit';
+      if (e.type === 'victory'
+        || (isHitRow && (!firstHitRowLogged || e.text.indexOf('，倒地！') >= 0))) {
+        cls += ' log-key';
+      }
+      var actor = actorOfLogText(e.text);
+      var actorMember = actor ? memberByName(actor) : null;
+      if (actorMember) cls += ' log-' + actorMember.faction;
+      div.className = cls;
       div.textContent = e.text;
       frag.appendChild(div);
+      if (isHitRow) firstHitRowLogged = true;
     }
     renderedLogCount = state.log.length;
     box.appendChild(frag);
@@ -555,6 +577,7 @@
     setConfigEnabled(false);              // 開戦後は配置をロック（画面遷移と二重の保険）
     renderedLogCount = 0;
     firstContactSeen = false;
+    firstHitRowLogged = false;
     $('battle-log').innerHTML = '';
     $('battle-banner').hidden = true;
     $('btn-skip').disabled = false;
@@ -595,6 +618,7 @@
     rng = null;
     renderedLogCount = 0;
     firstContactSeen = false;
+    firstHitRowLogged = false;
     cardRefs = {};
     chipRefs = {};
     $('battle-grid').innerHTML = '';

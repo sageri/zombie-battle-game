@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>丧尸 vs 人类 · 暗色末日战场（原型演示）</title>
+<!-- =====================================================================
+  PROTOTYPE — 暗色末日方向の提示用デモ（issue #15）。
+  スロー可能な捨てコード：main には絶対に統合しない。
+  * file:// ダブルクリックで起動。外部リソース・ネットワーク一切なし。
+  * 変体（バリアント）は location.hash で切替（#variant=A|B|C / #view=config）。
+    ※ file:// では history.replaceState が例外になり得るため hash のみ使う。
+  * 中身は全部仮データ（エンジン不接続）。ログ文言は現行エンジンの
+    書式をそのまま踏襲（禁則語は使わない）。
+  * window.__protoGoto(n) / window.__protoPlay() / window.__protoState は
+    CDP スクリーンショット検証用の公開フック。
+===================================================================== -->
+<style>
+:root{
+  --bg:#0b0e13; --bg2:#10141c; --panel:#141924; --line:#2a3140;
+  --ink:#c9d4e3; --ink-dim:#7d8aa0;
+  --human:#5ad1c8; --human-deep:#1d6f6a;
+  --zombie:#e5484d; --zombie-deep:#7a1f24;
+  --gold:#e8c268;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #182030 0%, transparent 60%),
+    radial-gradient(900px 500px at 50% 115%, #1c1216 0%, transparent 55%),
+    var(--bg);
+  color:var(--ink);
+  font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  min-height:100vh; overflow-x:hidden;
+}
+/* 廃土の質感：微かな走査線＋暗隅（画像は使わない） */
+body::after{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:5;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 1px, transparent 1px 3px),
+    radial-gradient(140% 100% at 50% 50%, transparent 55%, rgba(0,0,0,.42) 100%);
+}
+.proto-tag{
+  position:fixed; top:10px; right:12px; z-index:60;
+  font-size:11px; letter-spacing:.08em; color:#0b0e13;
+  background:var(--gold); border-radius:3px; padding:3px 8px; font-weight:700;
+}
+.vroot{display:none; min-height:100vh; padding:18px 20px 86px}
+.vroot.on{display:block}
+
+/* ===== 共通：順序帯・カード・ログ ==================================== */
+.strip{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
+.chip{
+  display:flex; align-items:center; gap:5px;
+  border:1px solid var(--line); border-radius:20px;
+  padding:3px 10px; font-size:12px; color:var(--ink-dim);
+  background:rgba(255,255,255,.02); transition:all .25s;
+}
+.chip .em{font-size:14px}
+.chip.human{border-color:rgba(90,209,200,.35)}
+.chip.zombie{border-color:rgba(229,72,77,.35)}
+.chip.active{
+  color:#fff; background:rgba(255,255,255,.08);
+  box-shadow:0 0 10px rgba(90,209,200,.25), inset 0 0 8px rgba(255,255,255,.05);
+  transform:translateY(-2px);
+}
+.chip.downed{opacity:.38; filter:grayscale(.9)}
+.grid{
+  display:grid; position:relative;
+  grid-template-columns:repeat(9,var(--cell)); grid-template-rows:repeat(9,var(--cell));
+  gap:2px; background:#070a0f; border:1px solid var(--line); padding:6px;
+  box-shadow:0 18px 50px rgba(0,0,0,.55), inset 0 0 40px rgba(0,0,0,.5);
+}
+.cell{
+  position:relative; border:1px solid #1b212d; background:#0d1119; border-radius:2px;
+  background-image:linear-gradient(135deg, rgba(255,255,255,.015) 25%, transparent 25%);
+}
+.cell.alt{background-color:#101623}
+.cell.trail{box-shadow:inset 0 0 12px rgba(90,209,200,.35); border-color:rgba(90,209,200,.45)}
+.ucard{
+  position:absolute; inset:2px; border-radius:4px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.015));
+  border:1px solid var(--line); cursor:default; z-index:2;
+  transition:transform .35s ease, opacity .4s;
+}
+.ucard .em{font-size:calc(var(--cell) * .42); line-height:1}
+.ucard .hp{width:74%; height:4px; margin-top:3px; border-radius:2px; background:#232a38; overflow:hidden}
+.ucard .hp i{display:block; height:100%; border-radius:2px; transition:width .45s}
+.ucard.human{border-color:rgba(90,209,200,.55); box-shadow:0 0 9px rgba(90,209,200,.18)}
+.ucard.human .hp i{background:linear-gradient(90deg,var(--human-deep),var(--human))}
+.ucard.zombie{border-color:rgba(229,72,77,.55); box-shadow:0 0 9px rgba(229,72,77,.18)}
+.ucard.zombie .hp i{background:linear-gradient(90deg,var(--zombie-deep),var(--zombie))}
+.ucard.actor{z-index:3; outline:1.5px solid rgba(255,255,255,.65); outline-offset:1px}
+.ucard.downed{opacity:0; transform:scale(.55) rotate(8deg); pointer-events:none}
+.ucard.hitflash{animation:hitflash .38s}
+@keyframes hitflash{0%{background:rgba(229,72,77,.55)}100%{background:transparent}}
+.float{
+  position:absolute; left:50%; top:-6px; transform:translateX(-50%);
+  font-weight:700; font-size:calc(var(--cell) * .3); white-space:nowrap;
+  text-shadow:0 2px 6px #000; pointer-events:none; z-index:9;
+  animation:floatup .95s ease-out forwards;
+}
+.float.dmg{color:#ff7b80}.float.dice{color:#9fb3d0; font-size:calc(var(--cell) * .24)}
+.float.miss{color:var(--human)}
+@keyframes floatup{0%{opacity:0; translate:0 6px}15%{opacity:1}100%{opacity:0; translate:0 -26px}}
+.intent{position:absolute; left:0; top:0; pointer-events:none; z-index:1; overflow:visible}
+.stamp{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  color:var(--zombie); font-weight:800; font-size:calc(var(--cell) * .3);
+  border:2px solid var(--zombie); border-radius:4px; transform:rotate(-12deg);
+  background:rgba(11,14,19,.72); z-index:8;
+  animation:stampin .5s cubic-bezier(.2,2.4,.4,1) both;
+}
+@keyframes stampin{0%{opacity:0; transform:rotate(-12deg) scale(2.2)}100%{opacity:1; transform:rotate(-12deg) scale(1)}}
+.log{overflow-y:auto; scrollbar-width:thin; scrollbar-color:#2a3140 transparent}
+.log .row{padding:3px 8px; border-left:2px solid transparent; font-size:12.5px; line-height:1.55}
+.log .row.order{color:var(--ink-dim); font-size:12px}
+.log .row.round{color:#5b6a82; text-align:center; margin:4px 0}
+.log .row.move{color:#9fb3d0}
+.log .row.blocked{color:#8a7f6a}
+.log .row.hit{color:#e8989b; border-left-color:var(--zombie); background:rgba(229,72,77,.06)}
+.log .row.dodge{color:var(--human); border-left-color:var(--human); background:rgba(90,209,200,.06)}
+.log .row.victory{color:var(--gold); font-weight:700; font-size:14px; background:rgba(232,194,104,.07); border-left-color:var(--gold)}
+.win-banner{
+  position:absolute; inset:0; display:none; z-index:20;
+  align-items:center; justify-content:center; flex-direction:column; gap:8px;
+  background:radial-gradient(ellipse at center, rgba(7,10,15,.88), rgba(7,10,15,.55));
+  border-radius:4px; text-align:center;
+}
+.win-banner.show{display:flex}
+.win-banner .t{font-size:26px; color:var(--gold); font-weight:800; text-shadow:0 0 24px rgba(232,194,104,.4)}
+.win-banner .b{font-size:14px; color:var(--ink); line-height:1.8}
+
+/* ===== 変体 A：転播 HUD ============================================== */
+#v-A{--cell:52px}
+#v-A .va-head{display:flex; align-items:baseline; gap:14px; margin-bottom:12px}
+#v-A .va-title{font-size:21px; font-weight:800; color:#e7edf5}
+#v-A .va-title span{font-size:12px; font-weight:400; color:var(--ink-dim); margin-left:10px}
+#v-A .va-body{display:grid; grid-template-columns:250px auto 300px; gap:16px; align-items:start}
+#v-A .va-left{display:flex; flex-direction:column; gap:14px; position:sticky; top:16px}
+#v-A .camp{border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel)}
+#v-A .camp .nm{font-size:13px; font-weight:700; margin-bottom:7px; display:flex; justify-content:space-between}
+#v-A .camp.human .nm{color:var(--human)} #v-A .camp.zombie .nm{color:var(--zombie)}
+#v-A .bigbar{height:12px; border-radius:6px; background:#1a212e; overflow:hidden; border:1px solid #232b3b}
+#v-A .bigbar i{display:block; height:100%; transition:width .6s}
+#v-A .camp.human .bigbar i{background:linear-gradient(90deg,var(--human-deep),var(--human))}
+#v-A .camp.zombie .bigbar i{background:linear-gradient(90deg,var(--zombie-deep),var(--zombie))}
+#v-A .camp .num{font-size:12px; color:var(--ink-dim); margin-top:5px; text-align:right; font-variant-numeric:tabular-nums}
+#v-A .va-stripwrap{border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--panel)}
+#v-A .va-stripwrap h3, #v-A .va-right h3{font-size:12px; color:var(--ink-dim); letter-spacing:.14em; margin-bottom:8px; font-weight:600}
+#v-A .va-right{display:flex; flex-direction:column; height:566px; position:sticky; top:16px}
+#v-A .va-right .log{flex:1; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:8px 4px}
+#v-A .stage-wrap{position:relative}
+#v-A .stage-wrap.shake{animation:shake .42s}
+@keyframes shake{
+  0%,100%{transform:translate(0,0)} 20%{transform:translate(-6px,3px)}
+  40%{transform:translate(5px,-4px)} 60%{transform:translate(-4px,-2px)} 80%{transform:translate(3px,3px)}
+}
+#v-A .redge{position:absolute; inset:-6px; border-radius:8px; pointer-events:none; opacity:0; z-index:4}
+#v-A .redge.on{animation:redge .6s}
+@keyframes redge{0%{opacity:0}30%{opacity:1}100%{opacity:0}}
+#v-A .redge.hit{box-shadow:inset 0 0 0 2px rgba(229,72,77,.5), inset 0 0 60px rgba(229,72,77,.16)}
+#v-A .redge.down{box-shadow:inset 0 0 0 3px rgba(229,72,77,.8), inset 0 0 110px rgba(229,72,77,.3)}
+
+/* ===== 変体 B：没入暗室 ============================================== */
+#v-B{--cell:62px; padding:0; display:none}
+#v-B.on{display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh}
+#v-B .vb-top{width:596px; display:flex; flex-direction:column; gap:8px; margin-bottom:12px}
+#v-B .vb-dual{display:flex; gap:8px; align-items:center}
+#v-B .vb-dual .lbl{font-size:12px; color:var(--ink-dim); width:52px; text-align:right}
+#v-B .vb-thin{flex:1; height:7px; border-radius:4px; background:#161d29; overflow:hidden}
+#v-B .vb-thin i{display:block; height:100%; transition:width .6s}
+#v-B .vb-thin.human i{background:var(--human)} #v-B .vb-thin.zombie i{background:var(--zombie)}
+#v-B .vb-strip{justify-content:center}
+#v-B .stage-wrap{position:relative}
+#v-B .spot{
+  position:absolute; inset:-80px; pointer-events:none; z-index:6; opacity:0;
+  background:radial-gradient(ellipse at center, transparent 30%, rgba(5,7,11,.82) 78%);
+}
+#v-B .spot.on{animation:spot .75s}
+@keyframes spot{0%{opacity:0}25%{opacity:1}75%{opacity:1}100%{opacity:0}}
+#v-B .vb-sub{
+  margin-top:14px; width:596px; min-height:44px; display:flex; align-items:center; justify-content:center;
+  border:1px solid rgba(255,255,255,.08); border-radius:8px;
+  background:rgba(10,13,19,.75); backdrop-filter:blur(3px);
+  padding:8px 14px; font-size:13.5px; color:#b9c6d9; text-align:center;
+}
+#v-B .vb-sub .key{
+  position:absolute; left:50%; top:-4px; transform:translate(-50%,-100%);
+  font-size:19px; font-weight:800; white-space:nowrap;
+  animation:popline 1.15s ease-out forwards; pointer-events:none;
+}
+@keyframes popline{0%{opacity:0; translate:0 10px; scale:.85}18%{opacity:1; scale:1.06}30%{scale:1}78%{opacity:1}100%{opacity:0}}
+#v-B .vb-subwrap{position:relative}
+
+/* ===== 変体 C：戦術台 ================================================ */
+#v-C{--cell:54px}
+#v-C .vc-head{display:flex; align-items:baseline; gap:14px; margin-bottom:14px}
+#v-C .vc-head h1{font-size:19px; color:#e7edf5; letter-spacing:.1em}
+#v-C .vc-head span{font-size:12px; color:var(--ink-dim)}
+#v-C .vc-body{display:grid; grid-template-columns:230px auto 320px; gap:18px; align-items:start}
+#v-C .vc-panel{display:flex; flex-direction:column; gap:12px}
+#v-C .gauge{
+  border:1px solid var(--line); border-radius:10px; background:var(--panel);
+  padding:12px; display:flex; gap:12px; align-items:center;
+}
+#v-C .gauge svg{width:64px; height:64px; flex:none}
+#v-C .gauge .ring-bg{fill:none; stroke:#1c2331; stroke-width:7}
+#v-C .gauge.human .ring{fill:none; stroke:var(--human); stroke-width:7; stroke-linecap:round;
+  transform:rotate(-90deg); transform-origin:center; transition:stroke-dashoffset .6s}
+#v-C .gauge.zombie .ring{fill:none; stroke:var(--zombie); stroke-width:7; stroke-linecap:round;
+  transform:rotate(-90deg); transform-origin:center; transition:stroke-dashoffset .6s}
+#v-C .gauge .g-info{font-size:12px; line-height:1.9; color:var(--ink-dim)}
+#v-C .gauge .g-info b{font-size:16px; color:var(--ink); font-variant-numeric:tabular-nums}
+#v-C .vc-stripwrap{border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:10px}
+#v-C .vc-stripwrap h3, #v-C .vc-right h3{font-size:11px; letter-spacing:.2em; color:var(--ink-dim); margin-bottom:8px}
+#v-C .stage-outer{
+  padding:14px; border-radius:12px;
+  border:1px solid #3a3325;
+  background:
+    linear-gradient(160deg, #2b2620 0%, #171a22 55%, #1d1712 100%);
+  box-shadow:0 22px 60px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.05);
+}
+#v-C .grid{border-color:#3d3527; background:#0a0c10; box-shadow:inset 0 0 46px rgba(0,0,0,.66)}
+#v-C .cell{border-color:#241f16; background-color:#0e1016}
+#v-C .cell.alt{background-color:#12151d}
+#v-C .vc-right .log{
+  height:560px; border:1px solid var(--line); border-radius:10px; background:#0c0f15;
+  font-family:Consolas,"Courier New",monospace; font-size:12px; padding:8px 6px;
+}
+#v-C .log .row{border-left:none; border-left:2px solid transparent; display:flex; gap:7px}
+#v-C .log .row .tno{color:#4d5a70; flex:none; min-width:34px; text-align:right; font-size:11px; padding-top:2px}
+#v-C .flash-cell{outline:2px solid rgba(232,194,104,.7); outline-offset:-2px}
+
+/* ===== 配置ページ示意 ================================================ */
+#v-config{display:none; align-items:center; justify-content:center}
+#v-config.on{display:flex}
+#v-config .cfg-wrap{width:min(860px,94vw)}
+#v-config h1{font-size:22px; color:#e7edf5; text-align:center}
+#v-config .cfg-sub{text-align:center; color:var(--ink-dim); font-size:12.5px; margin:8px 0 22px}
+#v-config .cfg-cols{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+#v-config fieldset{
+  border:1px solid var(--line); border-radius:12px; background:var(--panel); padding:16px 18px;
+}
+#v-config fieldset.human{border-color:rgba(90,209,200,.4)}
+#v-config fieldset.zombie{border-color:rgba(229,72,77,.4)}
+#v-config legend{padding:0 8px; font-weight:700; font-size:14px}
+#v-config fieldset.human legend{color:var(--human)}
+#v-config fieldset.zombie legend{color:var(--zombie)}
+#v-config .frow{display:grid; grid-template-columns:96px 1fr; gap:10px; align-items:center; margin-bottom:10px}
+#v-config label.frow{font-size:13px; color:var(--ink-dim)}
+#v-config input, #v-config select{
+  background:#0c1017; border:1px solid var(--line); color:var(--ink);
+  border-radius:6px; padding:7px 10px; font-size:14px; width:100%;
+}
+#v-config input:focus, #v-config select:focus{outline:1px solid var(--human)}
+#v-config .cfg-foot{display:flex; align-items:center; gap:16px; margin-top:20px; justify-content:center}
+#v-config .cfg-start{
+  background:linear-gradient(180deg,#20283a,#161c2a); color:#eaf1fb;
+  border:1px solid #3b4656; border-radius:8px;
+  padding:10px 34px; font-size:15px; font-weight:700; cursor:pointer;
+}
+#v-config .cfg-start:hover{box-shadow:0 0 16px rgba(90,209,200,.25)}
+#v-config .cfg-note{font-size:11.5px; color:#5b6a82}
+/* 変体毎のアクセント（配置ページ示意） */
+body[data-variant="B"] #v-config fieldset.human{border-color:rgba(126,224,255,.45)}
+body[data-variant="B"] #v-config fieldset.human legend{color:#7ee0ff}
+body[data-variant="C"] #v-config fieldset.human{border-color:rgba(255,209,102,.45)}
+body[data-variant="C"] #v-config fieldset.human legend{color:#ffd166}
+
+/* ===== 切替バー（評価対象外の操作面） ================================ */
+#switcher{
+  position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:80;
+  display:flex; align-items:center; gap:8px;
+  background:#f2f4f8; color:#1a2230; border-radius:999px; padding:7px 12px;
+  box-shadow:0 8px 28px rgba(0,0,0,.55); font-size:13px;
+}
+#switcher button{
+  background:#1a2230; color:#fff; border:none; border-radius:999px;
+  padding:5px 12px; cursor:pointer; font-size:12.5px;
+}
+#switcher button:hover{background:#2c3850}
+#sw-label{font-weight:700; min-width:118px; text-align:center}
+#sw-beat{color:#5b6a82; font-variant-numeric:tabular-nums; font-size:12px}
+</style>
+</head>
+<body data-variant="A">
+<div class="proto-tag">PROTOTYPE · 方向演示</div>
+
+<!-- ============ 変体 A：転播 HUD ============ -->
+<section class="vroot" id="v-A">
+  <header class="va-head">
+    <div class="va-title">丧尸 vs 人类<span>暗色末日 · 转播 HUD · 变体 A</span></div>
+  </header>
+  <div class="va-body">
+    <div class="va-left">
+      <div class="camp human">
+        <div class="nm"><span>人类阵营</span></div>
+        <div class="bigbar"><i data-status="human" style="width:100%"></i></div>
+        <div class="num" data-statusnum="human">68 / 68</div>
+      </div>
+      <div class="camp zombie">
+        <div class="nm"><span>丧尸阵营</span></div>
+        <div class="bigbar"><i data-status="zombie" style="width:100%"></i></div>
+        <div class="num" data-statusnum="zombie">23 / 23</div>
+      </div>
+      <div class="va-stripwrap">
+        <h3>顺序带</h3>
+        <div class="strip" data-strip></div>
+      </div>
+    </div>
+    <main class="stage-wrap" data-stage>
+      <div class="grid" data-grid></div>
+      <div class="redge hit" data-redge-hit></div>
+      <div class="redge down" data-redge-down></div>
+      <div class="win-banner" data-win></div>
+    </main>
+    <div class="va-right">
+      <h3>解说流</h3>
+      <div class="log" data-log></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 変体 B：没入暗室 ============ -->
+<section class="vroot" id="v-B">
+  <div class="vb-top">
+    <div class="vb-dual">
+      <span class="lbl">人类</span><div class="vb-thin human"><i data-status="human" style="width:100%"></i></div>
+      <span class="lbl" data-statusnum="human">68/68</span>
+    </div>
+    <div class="vb-dual">
+      <span class="lbl">丧尸</span><div class="vb-thin zombie"><i data-status="zombie" style="width:100%"></i></div>
+      <span class="lbl" data-statusnum="zombie">23/23</span>
+    </div>
+    <div class="strip vb-strip" data-strip></div>
+  </div>
+  <div class="stage-wrap" data-stage>
+    <div class="grid" data-grid></div>
+    <div class="spot" data-spot></div>
+    <div class="win-banner" data-win></div>
+  </div>
+  <div class="vb-subwrap">
+    <div class="vb-sub" data-subtitle>——</div>
+  </div>
+</section>
+
+<!-- ============ 変体 C：戦術台 ============ -->
+<section class="vroot" id="v-C">
+  <header class="vc-head"><h1>战术台</h1><span>暗色末日 · 数据密度优先 · 变体 C</span></header>
+  <div class="vc-body">
+    <div class="vc-panel">
+      <div class="gauge human">
+        <svg viewBox="0 0 64 64"><circle class="ring-bg" cx="32" cy="32" r="26"/><circle class="ring" cx="32" cy="32" r="26" stroke-dasharray="163.4" stroke-dashoffset="0" data-ring="human"/></svg>
+        <div class="g-info">人类阵营<br><b data-statusnum="human">68</b> / 68 HP<br>在场 <b data-alive="human">4</b> 人</div>
+      </div>
+      <div class="gauge zombie">
+        <svg viewBox="0 0 64 64"><circle class="ring-bg" cx="32" cy="32" r="26"/><circle class="ring" cx="32" cy="32" r="26" stroke-dasharray="163.4" stroke-dashoffset="0" data-ring="zombie"/></svg>
+        <div class="g-info">丧尸阵营<br><b data-statusnum="zombie">23</b> / 23 HP<br>在场 <b data-alive="zombie">3</b> 人</div>
+      </div>
+      <div class="vc-stripwrap">
+        <h3>顺序带</h3>
+        <div class="strip" data-strip></div>
+      </div>
+    </div>
+    <main class="stage-outer" data-stage>
+      <div class="grid" data-grid></div>
+      <div class="win-banner" data-win></div>
+    </main>
+    <div class="vc-right">
+      <h3>电报记录</h3>
+      <div class="log" data-log></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 配置ページ示意（静的） ============ -->
+<section class="vroot" id="v-config">
+  <div class="cfg-wrap">
+    <h1>丧尸 vs 人类 自动战斗器</h1>
+    <p class="cfg-sub">配置页暗色示意（静态演示 · 数值为示意）</p>
+    <div class="cfg-cols">
+      <fieldset class="human">
+        <legend>人类阵营</legend>
+        <label class="frow">人数<input type="number" value="4"></label>
+        <label class="frow">HP<input type="number" value="18"></label>
+        <label class="frow">攻击<input type="number" value="7"></label>
+        <label class="frow">敏捷<input type="number" value="3"></label>
+        <label class="frow">伤害下限<input type="number" value="1"></label>
+        <label class="frow">伤害上限<input type="number" value="6"></label>
+      </fieldset>
+      <fieldset class="zombie">
+        <legend>丧尸阵营</legend>
+        <label class="frow">人数<input type="number" value="3"></label>
+        <label class="frow">HP<input type="number" value="10"></label>
+        <label class="frow">攻击<input type="number" value="6"></label>
+        <label class="frow">敏捷<input type="number" value="2"></label>
+        <label class="frow">伤害下限<input type="number" value="1"></label>
+        <label class="frow">伤害上限<input type="number" value="6"></label>
+      </fieldset>
+    </div>
+    <div class="cfg-foot">
+      <label class="frow" style="grid-template-columns:70px 150px">初始站位
+        <select><option>混合随机</option><option>阵营分区</option></select>
+      </label>
+      <button class="cfg-start">开始战斗</button>
+      <span class="cfg-note">本页为原型演示，不接引擎</span>
+    </div>
+  </div>
+</section>
+
+<nav id="switcher">
+  <button id="sw-prev" title="上一个变体（←）">◀</button>
+  <span id="sw-label">变体 A · 转播 HUD</span>
+  <button id="sw-next" title="下一个变体（→）">▶</button>
+  <button id="sw-config">配置页</button>
+  <button id="sw-replay">重新演示</button>
+  <span id="sw-beat">拍 0 / 21</span>
+</nav>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =====================================================
+   * 仮データ：角色・行動順・21 拍のシナリオ
+   * ログ文言は現行エンジンの書式をそのまま踏襲する（禁則語不使用）。
+   * ===================================================== */
+  var CAMP = {
+    '玩家1': 'human', '玩家2': 'human', '玩家3': 'human', '玩家4': 'human',
+    '丧尸1': 'zombie', '丧尸2': 'zombie', '丧尸3': 'zombie'
+  };
+  var MAXHP = { '玩家1': 18, '玩家2': 18, '玩家3': 18, '玩家4': 14, '丧尸1': 7, '丧尸2': 10, '丧尸3': 6 };
+  var INIT = {
+    '玩家1': [2, 2], '玩家2': [4, 3], '玩家3': [3, 4], '玩家4': [6, 2],
+    '丧尸1': [3, 6], '丧尸2': [4, 6], '丧尸3': [5, 6]
+  };
+  var ORDER = ['玩家2', '丧尸2', '玩家1', '丧尸1', '玩家3', '丧尸3', '玩家4'];
+  var D100  = { '玩家2': 91, '丧尸2': 87, '玩家1': 73, '丧尸1': 64, '玩家3': 58, '丧尸3': 41, '玩家4': 22 };
+  var EMOJI = { human: '🧑', zombie: '🧟' };
+
+  // 各拍: k = move | hit | dodge | blocked | skip | win
+  // hit/dodge の text は現行ログと同一書式（全角 ≤ ＞ ・全角括印に注意）
+  var TURNS = [
+    { k: 'move', a: '玩家2', from: [4, 3], to: [4, 4], near: '丧尸2',
+      text: '玩家2 移动：（4,3）→（4,4）' },
+    { k: 'move', a: '丧尸2', from: [4, 6], to: [4, 5], near: '玩家2',
+      text: '丧尸2 移动：（4,6）→（4,5）' },
+    { k: 'move', a: '玩家1', from: [2, 2], to: [2, 3], near: '丧尸1',
+      text: '玩家1 移动：（2,2）→（2,3）' },
+    { k: 'move', a: '丧尸1', from: [3, 6], to: [3, 5], near: '玩家3',
+      text: '丧尸1 移动：（3,6）→（3,5）' },
+    { k: 'hit', a: '玩家3', t: '丧尸1', dmg: 3, rest: 4, down: false,
+      text: '玩家3 → 丧尸1：攻击检定 d7=3 ≤ 攻击7，命中；闪避检定 d7=4 ＞ 敏捷2，未闪避；伤害 3，丧尸1 剩余 HP 4' },
+    { k: 'move', a: '丧尸3', from: [5, 6], to: [5, 5], near: '玩家2',
+      text: '丧尸3 移动：（5,6）→（5,5）' },
+    { k: 'move', a: '玩家4', from: [6, 2], to: [6, 3], near: '丧尸3',
+      text: '玩家4 移动：（6,2）→（6,3）' },
+    { k: 'hit', a: '玩家2', t: '丧尸2', dmg: 4, rest: 6, down: false,
+      text: '玩家2 → 丧尸2：攻击检定 d7=2 ≤ 攻击7，命中；闪避检定 d7=5 ＞ 敏捷2，未闪避；伤害 4，丧尸2 剩余 HP 6' },
+    { k: 'dodge', a: '丧尸2', t: '玩家2',
+      text: '丧尸2 → 玩家2：攻击检定 d7=4 ≤ 攻击6，命中；闪避检定 d7=1 ≤ 敏捷3，闪避成功' },
+    { k: 'move', a: '玩家1', from: [2, 3], to: [2, 4], near: '丧尸1',
+      text: '玩家1 移动：（2,3）→（2,4）' },
+    { k: 'hit', a: '丧尸1', t: '玩家3', dmg: 2, rest: 16, down: false,
+      text: '丧尸1 → 玩家3：攻击检定 d7=3 ≤ 攻击6，命中；闪避检定 d7=6 ＞ 敏捷3，未闪避；伤害 2，玩家3 剩余 HP 16' },
+    { k: 'hit', a: '玩家3', t: '丧尸1', dmg: 4, rest: 0, down: true,
+      text: '玩家3 → 丧尸1：攻击检定 d7=5 ≤ 攻击7，命中；闪避检定 d7=3 ＞ 敏捷2，未闪避；伤害 4，丧尸1 剩余 HP 0，倒地！' },
+    { k: 'move', a: '丧尸3', from: [5, 5], to: [5, 4], near: '玩家2',
+      text: '丧尸3 移动：（5,5）→（5,4）' },
+    { k: 'move', a: '玩家4', from: [6, 3], to: [5, 3], near: '丧尸3',
+      text: '玩家4 移动：（6,3）→（5,3）' },
+    { k: 'hit', a: '玩家2', t: '丧尸2', dmg: 6, rest: 0, down: true,
+      text: '玩家2 → 丧尸2：攻击检定 d7=6 ≤ 攻击7，命中；闪避检定 d7=4 ＞ 敏捷2，未闪避；伤害 6，丧尸2 剩余 HP 0，倒地！' },
+    { k: 'skip', a: '丧尸2' },
+    { k: 'move', a: '玩家1', from: [2, 4], to: [2, 5], near: '丧尸3',
+      text: '玩家1 移动：（2,4）→（2,5）' },
+    { k: 'skip', a: '丧尸1' },
+    { k: 'blocked', a: '玩家3', text: '玩家3 无法移动（无路可走）' },
+    { k: 'hit', a: '丧尸3', t: '玩家4', dmg: 2, rest: 12, down: false,
+      text: '丧尸3 → 玩家4：攻击检定 d7=1 ≤ 攻击6，命中；闪避检定 d7=5 ＞ 敏捷3，未闪避；伤害 2，玩家4 剩余 HP 12' },
+    { k: 'hit', a: '玩家4', t: '丧尸3', dmg: 6, rest: 0, down: true, win: true,
+      text: '玩家4 → 丧尸3：攻击检定 d7=4 ≤ 攻击7，命中；闪避检定 d7=2 ＞ 敏捷2，未闪避；伤害 6，丧尸3 剩余 HP 0，倒地！' }
+  ];
+  var WIN_TEXT = '战斗结束：人类阵营获胜！存活角色：玩家1（HP 18/18）、玩家2（HP 18/18）、玩家3（HP 16/18）、玩家4（HP 12/14）';
+  // ラウンド区切りが入る拍（1 始まり）：第 2 轮 = 8 拍目、第 3 轮 = 15 拍目
+  var ROUND_AT = { 8: '── 第 2 轮 ──', 15: '── 第 3 轮 ──' };
+  var BEAT_MS = 1050;
+
+  /* ===== 状態 ========================================================= */
+  var state = null;
+  var timer = null;
+
+  function freshState() {
+    var s = { beat: 0, hp: {}, pos: {}, downed: {}, log: [], intent: null, active: null };
+    for (var n in MAXHP) { s.hp[n] = MAXHP[n]; s.pos[n] = INIT[n].slice(); s.downed[n] = false; }
+    s.log.push({ k: 'order-head', text: '【行动顺序】（d100 点数，从大到小）' });
+    ORDER.forEach(function (n, i) {
+      s.log.push({ k: 'order', text: (i + 1) + '. ' + n + '（d100=' + D100[n] + '）（' + INIT[n][0] + ',' + INIT[n][1] + '）' });
+    });
+    s.log.push({ k: 'round', text: '── 第 1 轮 ──' });
+    return s;
+  }
+
+  function applyTurn(s, t, withFx) {
+    if (ROUND_AT[s.beat + 1]) s.log.push({ k: 'round', text: ROUND_AT[s.beat + 1] });
+    s.beat += 1;
+    s.active = t.a;
+    s.intent = null;
+    if (t.k === 'move') {
+      s.pos[t.a] = t.to.slice();
+      s.intent = { from: t.from.slice(), to: t.to.slice(), near: t.near, actor: t.a };
+      s.log.push({ k: 'move', text: t.text });
+    } else if (t.k === 'blocked') {
+      s.log.push({ k: 'blocked', text: t.text });
+    } else if (t.k === 'skip') {
+      s.downed[t.a] = true; /* 念のため冪等化（倒地済みの予定） */
+    } else if (t.k === 'hit') {
+      s.hp[t.t] = t.rest;
+      s.log.push({ k: 'hit', text: t.text, dmg: t.dmg, actor: t.a, target: t.t });
+      if (t.down) s.downed[t.t] = true;
+      if (withFx) fxHit(t);
+      if (t.win) {
+        s.log.push({ k: 'victory', text: WIN_TEXT });
+        if (withFx) fxWin();
+      }
+    } else if (t.k === 'dodge') {
+      s.log.push({ k: 'dodge', text: t.text, actor: t.a, target: t.t });
+      if (withFx) fxDodge(t);
+    }
+  }
+
+  /* ===== 演出（表示中の変体のみ。一時クラスの付与） ==================== */
+  function fxHit(t) {
+    eachRoot(function (root, key) {
+      // 標的セルは pos から特定（移動後座標）
+      var cell = cellAt(root, state.pos[t.t]);
+      if (cell) {
+        var card = cell.querySelector('.ucard');
+        if (card) {
+          card.classList.remove('hitflash'); void card.offsetWidth; card.classList.add('hitflash');
+          addFloat(card, '-' + t.dmg, 'dmg');
+        }
+        if (key === 'C') {
+          /* 変体 C：命中マスを金枠で発光（通常命中でも変体級の演出を保証） */
+          cell.classList.remove('flash-cell'); void cell.offsetWidth; cell.classList.add('flash-cell');
+          setTimeout(function () { cell.classList.remove('flash-cell'); }, 520);
+        }
+        if (t.down && key === 'C') {
+          var st = document.createElement('div');
+          st.className = 'stamp'; st.textContent = '倒地';
+          cell.appendChild(st);
+          setTimeout(function () { if (st.parentNode) st.parentNode.removeChild(st); }, 1400);
+        }
+      }
+      if (key === 'A') {
+        var rg = root.querySelector(t.down ? '[data-redge-down]' : '[data-redge-hit]');
+        if (rg) { rg.classList.remove('on'); void rg.offsetWidth; rg.classList.add('on'); }
+        var wrap = root.querySelector('.stage-wrap');
+        if (wrap) { wrap.classList.remove('shake'); void wrap.offsetWidth; wrap.classList.add('shake'); }
+      }
+      if (key === 'B') {
+        var sp = root.querySelector('[data-spot]');
+        if (sp) { sp.classList.remove('on'); void sp.offsetWidth; sp.classList.add('on'); }
+      }
+    });
+  }
+  function fxDodge(t) {
+    eachRoot(function (root) {
+      var cell = cellAt(root, state.pos[t.t]);
+      var card = cell && cell.querySelector('.ucard');
+      if (card) addFloat(card, '闪避', 'miss');
+    });
+  }
+  function fxWin() {
+    eachRoot(function (root) {
+      var w = root.querySelector('[data-win]');
+      if (!w) return;
+      w.innerHTML = '<div class="t">🏆 战斗结束：人类阵营获胜！</div>' +
+        '<div class="b">玩家1：剩余 HP 18/18<br>玩家2：剩余 HP 18/18<br>玩家3：剩余 HP 16/18<br>玩家4：剩余 HP 12/14</div>';
+      w.classList.add('show');
+    });
+  }
+
+  function addFloat(card, text, cls) {
+    var f = document.createElement('div');
+    f.className = 'float ' + cls; f.textContent = text;
+    card.appendChild(f);
+    setTimeout(function () { if (f.parentNode) f.parentNode.removeChild(f); }, 1000);
+  }
+
+  /* ===== 描画 ========================================================= */
+  var ROOTS = ['A', 'B', 'C'];
+
+  function eachRoot(fn) { ROOTS.forEach(function (k) { fn(document.getElementById('v-' + k), k); }); }
+
+  function cellAt(root, pos) {
+    if (!pos) return null;
+    return root.querySelector('[data-cell="' + pos[0] + '-' + pos[1] + '"]');
+  }
+
+  function campOf(n) { return CAMP[n]; }
+
+  function render() {
+    // 順序帯
+    eachRoot(function (root) {
+      var strip = root.querySelector('[data-strip]');
+      if (!strip) return;
+      strip.innerHTML = '';
+      ORDER.forEach(function (n) {
+        var c = document.createElement('span');
+        c.className = 'chip ' + campOf(n) + (n === state.active ? ' active' : '') + (state.downed[n] ? ' downed' : '');
+        c.innerHTML = '<span class="em">' + (state.downed[n] ? '💀' : EMOJI[campOf(n)]) + '</span>' + n;
+        strip.appendChild(c);
+      });
+    });
+    // 戦場（セル単位で再構築 — 81×3 なので毎拍全描き替えでも十分軽い）
+    eachRoot(function (root, key) {
+      var grid = root.querySelector('[data-grid]');
+      if (!grid) return;
+      // 前拍の意図オーバーレイを掃除（親に付けるため grid.innerHTML では消えない）
+      var old = root.querySelectorAll('svg.intent');
+      for (var oi = 0; oi < old.length; oi++) { if (old[oi].parentNode) old[oi].parentNode.removeChild(old[oi]); }
+      grid.innerHTML = '';
+      for (var r = 1; r <= 9; r++) {
+        for (var cc = 1; cc <= 9; cc++) {
+          var cell = document.createElement('div');
+          cell.className = 'cell' + ((r + cc) % 2 === 0 ? ' alt' : '');
+          cell.setAttribute('data-cell', r + '-' + cc);
+          grid.appendChild(cell);
+        }
+      }
+      // 足跡（変体 B）：直近の移動元・移動先を発光させる
+      if (key === 'B' && state.intent) {
+        var c1 = cellAt(root, state.intent.from), c2 = cellAt(root, state.intent.to);
+        if (c1) c1.classList.add('trail'); if (c2) c2.classList.add('trail');
+      }
+      // 角色
+      Object.keys(MAXHP).forEach(function (n) {
+        if (state.downed[n]) return; /* 倒地はマスから消える（用語: 倒地不占格） */
+        var cell = cellAt(root, state.pos[n]);
+        if (!cell) return;
+        var card = document.createElement('div');
+        card.className = 'ucard ' + campOf(n) + (n === state.active ? ' actor' : '');
+        card.title = n;
+        card.innerHTML = '<span class="em">' + EMOJI[campOf(n)] + '</span>' +
+          '<span class="hp"><i style="width:' + Math.round(100 * state.hp[n] / MAXHP[n]) + '%"></i></span>';
+        cell.appendChild(card);
+      });
+      // 意図（A: 細点線 / C: 矢印＋落点円）— SVG オーバーレイ
+      if (state.intent && (key === 'A' || key === 'C')) {
+        drawIntent(root, key);
+      }
+    });
+    // 態勢（合計 HP 比）
+    var sum = { human: 0, zombie: 0 }, max = { human: 0, zombie: 0 }, alive = { human: 0, zombie: 0 };
+    Object.keys(MAXHP).forEach(function (n) {
+      var c = campOf(n); max[c] += MAXHP[n]; sum[c] += state.hp[n];
+      if (!state.downed[n]) alive[c] += 1;
+    });
+    eachRoot(function (root) {
+      var hb = root.querySelector('[data-status="human"]'), zb = root.querySelector('[data-status="zombie"]');
+      if (hb) hb.style.width = (100 * sum.human / max.human) + '%';
+      if (zb) zb.style.width = (100 * sum.zombie / max.zombie) + '%';
+      var hn = root.querySelector('[data-statusnum="human"]'), zn = root.querySelector('[data-statusnum="zombie"]');
+      if (hn) hn.textContent = sum.human + ' / ' + max.human;
+      if (zn) zn.textContent = sum.zombie + ' / ' + max.zombie;
+      var ringH = root.querySelector('[data-ring="human"]'), ringZ = root.querySelector('[data-ring="zombie"]');
+      if (ringH) ringH.setAttribute('stroke-dashoffset', (163.4 * (1 - sum.human / max.human)).toFixed(1));
+      if (ringZ) ringZ.setAttribute('stroke-dashoffset', (163.4 * (1 - sum.zombie / max.zombie)).toFixed(1));
+      var ah = root.querySelector('[data-alive="human"]'), az = root.querySelector('[data-alive="zombie"]');
+      if (ah) ah.textContent = alive.human; if (az) az.textContent = alive.zombie;
+    });
+    // ログ（末尾 40 行・自動で一番下へ）
+    eachRoot(function (root, key) {
+      var log = root.querySelector('[data-log]');
+      if (!log) return;
+      log.innerHTML = '';
+      state.log.slice(-40).forEach(function (row, i, arr) {
+        var d = document.createElement('div');
+        d.className = 'row ' + row.k;
+        if (key === 'C') {
+          var tno = document.createElement('span'); tno.className = 'tno'; tno.textContent = '·';
+          d.appendChild(tno);
+          var tx = document.createElement('span'); tx.textContent = row.text; d.appendChild(tx);
+        } else {
+          d.textContent = row.text;
+        }
+        log.appendChild(d);
+      });
+      log.scrollTop = log.scrollHeight;
+    });
+    // 変体 B の字幕：直近の意味のある行
+    var sub = document.querySelector('#v-B [data-subtitle]');
+    if (sub) {
+      var meaningful = state.log.filter(function (r) { return r.k === 'move' || r.k === 'hit' || r.k === 'dodge' || r.k === 'blocked' || r.k === 'victory'; });
+      sub.textContent = meaningful.length ? meaningful[meaningful.length - 1].text : '——';
+    }
+    // B のキー行ポップ（命中/倒地/勝利の時だけ）
+    var last = state.log[state.log.length - 1];
+    if (last && (last.k === 'hit' || last.k === 'victory')) popSubtitle(last.text);
+    document.getElementById('sw-beat').textContent = '拍 ' + state.beat + ' / ' + TURNS.length;
+    window.__protoState = { beat: state.beat, total: TURNS.length };
+  }
+
+  function popSubtitle(text) {
+    var wrap = document.querySelector('#v-B .vb-subwrap');
+    if (!wrap || !document.getElementById('v-B').classList.contains('on')) return;
+    var old = wrap.querySelector('.key');
+    if (old) old.parentNode.removeChild(old);
+    var k = document.createElement('div');
+    k.className = 'key';
+    k.textContent = text.length > 26 ? text.slice(0, 26) + '…' : text;
+    k.style.color = text.indexOf('倒地') >= 0 || text.indexOf('战斗结束') >= 0 ? 'var(--gold)' : '#ff9a9e';
+    wrap.appendChild(k);
+    setTimeout(function () { if (k.parentNode) k.parentNode.removeChild(k); }, 1200);
+  }
+
+  function drawIntent(root, key) {
+    var grid = root.querySelector('[data-grid]');
+    var fromCell = cellAt(root, state.intent.from);
+    var nearPos = state.pos[state.intent.near];
+    var toCell = cellAt(root, nearPos);
+    if (!fromCell || !toCell) return;
+    var gRect = grid.getBoundingClientRect();
+    function center(el) {
+      var r = el.getBoundingClientRect();
+      return { x: r.left - gRect.left + r.width / 2, y: r.top - gRect.top + r.height / 2 };
+    }
+    var p1 = center(fromCell), p2 = center(toCell);
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('class', 'intent');
+    svg.setAttribute('width', grid.clientWidth); svg.setAttribute('height', grid.clientHeight);
+    var color = campOf(state.intent.actor) === 'human' ? 'var(--human)' : 'var(--zombie)';
+    if (key === 'A') {
+      var line = document.createElementNS(svgNS, 'line');
+      line.setAttribute('x1', p1.x); line.setAttribute('y1', p1.y);
+      line.setAttribute('x2', p2.x); line.setAttribute('y2', p2.y);
+      line.setAttribute('stroke', color); line.setAttribute('stroke-width', '2');
+      line.setAttribute('stroke-dasharray', '5 6'); line.setAttribute('opacity', '.75');
+      svg.appendChild(line);
+    } else {
+      var len = Math.sqrt((p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y)) || 1;
+      var ux = (p2.x - p1.x) / len, uy = (p2.y - p1.y) / len;
+      var ax = p2.x - ux * 26, ay = p2.y - uy * 26;
+      var line2 = document.createElementNS(svgNS, 'line');
+      line2.setAttribute('x1', p1.x); line2.setAttribute('y1', p1.y);
+      line2.setAttribute('x2', ax); line2.setAttribute('y2', ay);
+      line2.setAttribute('stroke', color); line2.setAttribute('stroke-width', '2.5'); line2.setAttribute('opacity', '.85');
+      svg.appendChild(line2);
+      [[ax - uy * 7, ay + ux * 7], [ax + uy * 7, ay - ux * 7], [ax + ux * 9, ay + uy * 9]].forEach(function (pt) {
+        var pl = document.createElementNS(svgNS, 'polyline');
+        pl.setAttribute('points', ax + ',' + ay + ' ' + pt[0] + ',' + pt[1]);
+        pl.setAttribute('stroke', color); pl.setAttribute('stroke-width', '2.5'); pl.setAttribute('fill', 'none');
+        svg.appendChild(pl);
+      });
+      var circ = document.createElementNS(svgNS, 'ellipse');
+      circ.setAttribute('cx', p2.x); circ.setAttribute('cy', p2.y);
+      circ.setAttribute('rx', '15'); circ.setAttribute('ry', '15');
+      circ.setAttribute('fill', 'none'); circ.setAttribute('stroke', color);
+      circ.setAttribute('stroke-width', '1.5'); circ.setAttribute('stroke-dasharray', '3 4');
+      svg.appendChild(circ);
+    }
+    grid.parentNode.appendChild(svg);
+  }
+
+  /* ===== 進行制御 ===================================================== */
+  function step() {
+    if (state.beat >= TURNS.length) { stop(); render(); return; }
+    applyTurn(state, TURNS[state.beat], true);
+    render();
+    if (state.beat >= TURNS.length) { stop(); return; }
+    timer = setTimeout(step, BEAT_MS);
+  }
+  function stop() { if (timer) { clearTimeout(timer); timer = null; } }
+  function play() { stop(); if (state.beat >= TURNS.length) state = freshState(); timer = setTimeout(step, 300); }
+  window.__protoPlay = play;
+  window.__protoGoto = function (n) {
+    stop();
+    state = freshState();
+    var upto = Math.max(0, Math.min(n, TURNS.length));
+    for (var i = 0; i < upto; i++) applyTurn(state, TURNS[i], false);
+    render();
+  };
+
+  /* ===== hash ルーティング（file:// 対応・置換 API 不使用） ============ */
+  var VARIANTS = ['A', 'B', 'C'];
+  var VNAMES = { A: '转播 HUD', B: '沉浸暗舱', C: '战术台' };
+  var cur = { variant: 'A', view: 'battle' };
+
+  function readHash() {
+    var h = (location.hash || '').replace(/^#/, '');
+    var parts = h.split('&');
+    var v = null, view = null;
+    parts.forEach(function (p) {
+      var kv = p.split('=');
+      if (kv[0] === 'variant' && VARIANTS.indexOf(kv[1]) >= 0) v = kv[1];
+      if (kv[0] === 'view' && kv[1] === 'config') view = 'config';
+    });
+    cur.variant = v || 'A';
+    cur.view = view || 'battle';
+  }
+  function writeHash() {
+    var h = 'variant=' + cur.variant + (cur.view === 'config' ? '&view=config' : '');
+    if (location.hash !== '#' + h) location.hash = h;
+  }
+  function applyRoute() {
+    readHash();
+    document.getElementById('v-A').classList.toggle('on', cur.view === 'battle' && cur.variant === 'A');
+    document.getElementById('v-B').classList.toggle('on', cur.view === 'battle' && cur.variant === 'B');
+    document.getElementById('v-C').classList.toggle('on', cur.view === 'battle' && cur.variant === 'C');
+    document.getElementById('v-config').classList.toggle('on', cur.view === 'config');
+    document.body.setAttribute('data-variant', cur.variant);
+    document.getElementById('sw-label').textContent = '变体 ' + cur.variant + ' · ' + VNAMES[cur.variant];
+    document.getElementById('sw-config').textContent = cur.view === 'config' ? '返回战场' : '配置页';
+    render();
+  }
+  function cycleVariant(dir) {
+    var i = VARIANTS.indexOf(cur.variant);
+    cur.variant = VARIANTS[(i + dir + VARIANTS.length) % VARIANTS.length];
+    if (cur.view === 'config') cur.view = 'battle';
+    writeHash();
+  }
+
+  document.getElementById('sw-prev').addEventListener('click', function () { cycleVariant(-1); });
+  document.getElementById('sw-next').addEventListener('click', function () { cycleVariant(1); });
+  document.getElementById('sw-config').addEventListener('click', function () {
+    cur.view = (cur.view === 'config') ? 'battle' : 'config';
+    writeHash();
+  });
+  document.getElementById('sw-replay').addEventListener('click', function () { state = freshState(); render(); play(); });
+  window.addEventListener('hashchange', applyRoute);
+  document.addEventListener('keydown', function (e) {
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) return;
+    if (e.key === 'ArrowLeft') cycleVariant(-1);
+    if (e.key === 'ArrowRight') cycleVariant(1);
+  });
+
+  /* ===== 起動 ========================================================= */
+  state = freshState();
+  applyRoute();
+  play();
+  window.__protoState = { beat: 0, total: TURNS.length };
+})();
+</script>
+</body>
+</html>

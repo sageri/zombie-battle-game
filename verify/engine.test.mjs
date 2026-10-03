@@ -2588,6 +2588,20 @@ function main() {
       check(jEvents.some(e => e.kind === 'blocked'), '9j: 移動不能拍を含む');
       check(jEvents.some(e => e.kind === 'hit' && e.downed === true), '9j: 倒地拍を含む');
 
+      // S7/S8: 骨組み検査は DOM スタブでなく index.html 原文に対して行う
+      // （スタブの getElementById は未登録 id を即席生成するため、存在検査に
+      // ならない。原文の静的構造だけが真実源）
+      const htmlSrc = readFileSync(INDEX_HTML_PATH, 'utf8');
+      check(htmlSrc.includes('id="power-pane"'), 'S7: #power-pane が骨組みに実在する');
+      check(htmlSrc.includes('id="log-pane"'), 'S7: #log-pane が骨組みに実在する');
+      check(htmlSrc.includes('id="intent-layer"'), 'S7: #intent-layer が骨組みに実在する');
+      check(/<div id="battlefield"[\s\S]*?<div id="battle-grid"><\/div>\s*<div id="intent-layer"><\/div>/.test(htmlSrc),
+        'S7: #intent-layer は #battle-grid の兄弟として #battlefield 内に置く');
+      check(/<aside id="log-pane"[\s\S]*?id="battle-log"/.test(htmlSrc),
+        'S7: #battle-log は #log-pane に迁入されている');
+      check(/<section id="config-screen"[^>]*class="[^"]*dark-theme/.test(htmlSrc),
+        'S8: #config-screen に暗色主題クラスが付く（配色はスクリーンショットで人眼検収）');
+
       GUI.setSpeed('fast');
       spy.delays.length = 0;
       GUI.startBattle(deepCopy(jCfg), GE.createRng(jSeed));

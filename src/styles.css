@@ -66,24 +66,24 @@
 
   /* ---- 戦場（9×9 グリッド） ------------------------------------------ */
   #battlefield { display: flex; justify-content: center; margin: 20px 0 14px; }
-  /* マス辺長 44px は ui.js の CELL_PX と必ず一致させること */
+  /* マス辺長 64px は ui.js の CELL_PX と必ず一致させること（#16 規格） */
   #battle-grid {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(9, 44px);
-    grid-template-rows: repeat(9, 44px);
+    grid-template-columns: repeat(9, 64px);
+    grid-template-rows: repeat(9, 64px);
     border: 2px solid #bbb; border-radius: 6px; background: #fff;
     box-shadow: 0 1px 4px rgba(0, 0, 0, .08);
   }
   .grid-cell { border: 1px solid #ececec; }
   .grid-cell.alt { background: #f6f8f6; }
 
-  /* ---- キャラカード（マス内コンパクトカード: Emoji + ミニ血条、名前は title） --- */
+  /* ---- キャラカード（マス内カード: Emoji + ミニ血条 + 常顯名前） ------- */
   .unit-card {
     position: absolute; left: 0; top: 0;
-    width: 44px; height: 44px;
+    width: 64px; height: 64px;
     border: 1px solid #ccc; border-radius: 4px; background: #fff;
-    padding: 1px 1px 3px;
+    padding: 2px 1px 1px;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 1px;
     transition: transform .25s ease, opacity .2s ease, border-color .2s ease, box-shadow .2s ease;
@@ -93,9 +93,14 @@
   .unit-card.current { border-color: #e8a33d; box-shadow: 0 0 6px rgba(232, 163, 61, .8); z-index: 3; }
   /* 倒地はグリッドから即時除去（表示を消す。順序帯は灰化 💀 を保持） */
   .unit-card.downed { display: none; }
-  .unit-emoji { font-size: 19px; line-height: 1.1; }
-  .hp-bar { width: 34px; height: 5px; background: #e5e5e5; border-radius: 3px; overflow: hidden; }
+  .unit-emoji { font-size: 26px; line-height: 1.1; }
+  .hp-bar { width: 46px; height: 5px; background: #e5e5e5; border-radius: 3px; overflow: hidden; }
   .hp-fill { height: 100%; width: 100%; background: #3fa34d; border-radius: 3px; transition: width .45s ease; }
+  /* 常顯名前（#16 規格: 4 字超は省略記号。data は全文を保持する） */
+  .unit-name {
+    max-width: 58px; font-size: 10px; line-height: 1.1; color: #333;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
 
   /* ---- 飘字（カード頭上に浮かんで消える） ---------------------------- */
   .float-layer { position: absolute; left: 0; right: 0; top: -10px; height: 0; pointer-events: none; z-index: 5; }

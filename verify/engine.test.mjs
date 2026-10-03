@@ -354,10 +354,10 @@ function placementDraws(targetCells) {
   });
 }
 
-// UI の transform 文字列（ui.js の transformFor と CELL_PX=44 を模倣）。
-// カードの transform と state の pos の照合に使う
+// UI の transform 文字列（ui.js の transformFor と CELL_PX=64 を模倣）。
+// カードの transform と state の pos の照合に使う（#16 規格: 格子は 64px 固定）
 function transformFor(pos) {
-  return 'translate(' + (pos.col - 1) * 44 + 'px, ' + (pos.row - 1) * 44 + 'px)';
+  return 'translate(' + (pos.col - 1) * 64 + 'px, ' + (pos.row - 1) * 64 + 'px)';
 }
 
 // ----------------------------------------- ステップ実行テスト用の補助
@@ -2564,6 +2564,55 @@ function main() {
     checkEq(GE.MAX_STEPS, savedMax, '9i: MAX_STEPS を復元');
     GUI.resetToConfig();
     checkEq(GUI.getMode(), 'idle', 'UI テストは idle で終わる');
+
+    // =============================================== 9j) 呈现層升級（#16 規格: 接縫 S1–S8）
+    // 6v6 分区 seed 87 は move/hit/fail/dodge/blocked/skip の全拍種と
+    // 複数の倒地を含む一戦（決定論的に選定した固定种子。以後の接縫検査は
+    // この一戦を同期スケジューラで全拍駆動して行う）
+    {
+      const jCfg = {
+        placement: 'split',
+        human: { count: 6, hp: 12, attack: 5, agility: 3, dmgMin: 1, dmgMax: 3 },
+        zombie: { count: 6, hp: 9, attack: 6, agility: 2, dmgMin: 1, dmgMax: 4 },
+      };
+      const jSeed = 87;
+      const jrr = GE.createRng(jSeed);
+      const jStates = [GE.startBattle(deepCopy(jCfg), jrr)];
+      const jEvents = [];
+      while (!jStates[jStates.length - 1].finished) {
+        const jr = GE.stepBattle(jStates[jStates.length - 1], jrr);
+        jStates.push(jr.state);
+        jEvents.push(jr.event);
+      }
+      check(jEvents.some(e => e.kind === 'move'), '9j: 移動拍を含む');
+      check(jEvents.some(e => e.kind === 'blocked'), '9j: 移動不能拍を含む');
+      check(jEvents.some(e => e.kind === 'hit' && e.downed === true), '9j: 倒地拍を含む');
+
+      GUI.setSpeed('fast');
+      spy.delays.length = 0;
+      GUI.startBattle(deepCopy(jCfg), GE.createRng(jSeed));
+      checkEq(GUI.getMode(), 'live', '9j: 開戦で live へ');
+      checkEq(DOC.getElementById('battle-grid').children.length, 81 + 12,
+        'S7: 6v6 でも #battle-grid の子数は 81+角色数（追加節点は骨組み層へ）');
+
+      // S5/S6: 卡の子序は [0]emoji [1]血条 [2]飄字層（既存検査の索引依存）。
+      // 名前は末尾に追加する以外許されない。transform は 64px 独立算例と突き合わせる
+      for (const m of jStates[0].members) {
+        const card = DOC.getElementById('card-' + m.name);
+        checkEq(card.children.length, 4, 'S5: 卡の子は 4（emoji/血条/飄字/名前）: ' + m.name);
+        checkEq(card.children[0].className, 'unit-emoji', 'S5: [0] は emoji（子序凍結）: ' + m.name);
+        checkEq(card.children[1].className, 'hp-bar', 'S5: [1] は血条（子序凍結）: ' + m.name);
+        checkEq(card.children[2].className, 'float-layer', 'S5: [2] は飄字層（子序凍結）: ' + m.name);
+        checkEq(card.children[3].className, 'unit-name', 'S5: [3] は名前節点（末尾追加のみ）: ' + m.name);
+        checkEq(card.children[3].textContent, m.name, 'S5: 名前節点は常顯氏名: ' + m.name);
+        checkEq(card.style.transform,
+          'translate(' + (m.pos.col - 1) * 64 + 'px, ' + (m.pos.row - 1) * 64 + 'px)',
+          'S6: 格子 64px の transform（独立算例）: ' + m.name);
+      }
+      GUI.resetToConfig();
+      checkEq(GUI.getMode(), 'idle', '9j: 検査後は idle へ戻す');
+    }
+
     console.log('[progress] UI flow done, failures=' + failures.length);
   }
 

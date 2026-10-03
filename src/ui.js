@@ -91,9 +91,9 @@
   var chipRefs = {};        // 名前 → { chip, emoji }
 
   // ---- 戦場グリッド定数 ----------------------------------------------
-  // CSS 側（.grid-cell / .unit-card の 44px）と必ず一致させること
+  // CSS 側（.grid-cell / .unit-card の 64px）と必ず一致させること
   var GRID_SIZE = 9;        // 一辺のマス数（エンジンの 9×9 と一致）
-  var CELL_PX = 44;         // 1 マスの辺長 px
+  var CELL_PX = 64;         // 1 マスの辺長 px（#16 規格: 64px 固定）
 
   // ---- 小道具 --------------------------------------------------------
 
@@ -177,7 +177,8 @@
 
   // 戦場を一度だけ組み立てる: 81 マス＋全カード（以後は updateCards で更新）。
   // カードはマスの中に絶対配置し、transform の遷移で滑り移動する。
-  // 名前は血条の下に広げる余裕がないため title 属性（ホバー表示）に載せる。
+  // 子序は凍結面: [0]emoji [1]血条 [2]飄字層。名前は末尾 [3] に追加する
+  // （#16 規格: 名前常顯。4 字超は CSS 側で省略記号に丸める）
   function buildCards() {
     cardRefs = {};
     var grid = $('battle-grid');
@@ -203,9 +204,13 @@
       bar.appendChild(fill);
       var floatLayer = document.createElement('div');
       floatLayer.className = 'float-layer';
+      var name = document.createElement('div');
+      name.className = 'unit-name';
+      name.textContent = m.name;
       card.appendChild(emoji);
       card.appendChild(bar);
       card.appendChild(floatLayer);
+      card.appendChild(name);
       // DOM 挿入前に初期位置を確定させる（原点からの遷移演出を避ける）
       card.style.transform = transformFor(m.pos);
       card.title = m.name;

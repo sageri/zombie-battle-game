@@ -287,6 +287,23 @@
     }
   }
 
+  // 態勢條（#16 規格）: 両陣営の「存活 hp 合計 / maxHp 合計」を毎拍集計して
+  // 左欄の双條へ反映する。純呈現の集計で、結算（エンジン）には觸れない
+  function updatePowerPane() {
+    if (!state) return;
+    var sum = { human: 0, zombie: 0 };
+    var max = { human: 0, zombie: 0 };
+    for (var i = 0; i < state.members.length; i++) {
+      var m = state.members[i];
+      max[m.faction] += m.maxHp;
+      if (!m.downed) sum[m.faction] += m.hp;
+    }
+    FACTIONS.forEach(function (f) {
+      $('power-fill-' + f).style.width = (sum[f] / max[f]) * 100 + '%';
+      $('power-num-' + f).textContent = sum[f] + ' / ' + max[f];
+    });
+  }
+
   // すべての飘字レイヤーを空にする（各ステップの描画前に呼ぶ。
   // 計時器で個別削除せず、次のステップで置き換える方式）
   function clearFloats() {
@@ -403,12 +420,13 @@
     }
   }
 
-  // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・ログ）。
+  // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・日志）。
   // move は updateCards の transform 更新だけで滑り移動が表現され、
   // blocked はカードの動きなしでログだけが残る（いずれも通常の速度遅延で進む）
   function applyEvent(ev) {
     clearFloats();
     updateCards();
+    updatePowerPane();
     var activeName = ev.actor || null;
     updateStrip(activeName);
     setCurrentMarker(activeName);
@@ -433,6 +451,7 @@
     mode = 'done';
     pendingTimer = null;
     updateCards();
+    updatePowerPane();
     updateStrip(null);
     setCurrentMarker(null);
     clearFloats();
@@ -461,6 +480,7 @@
     buildStrip();
     showScreen('battle');
     mode = 'live';
+    updatePowerPane();
     appendLog();
     // 開戦直後は 1 拍置いてから最初の行動へ（阵容と順序帯を一望させる）
     var firstName = state.order[state.turnIndex];

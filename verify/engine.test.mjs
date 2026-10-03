@@ -2623,6 +2623,44 @@ function main() {
           'translate(' + (m.pos.col - 1) * 64 + 'px, ' + (m.pos.row - 1) * 64 + 'px)',
           'S6: 格子 64px の transform（独立算例）: ' + m.name);
       }
+
+      // S1: 態勢條は毎拍「Σ存活hp / ΣmaxHp」（純呈現集計）に同期する。
+      // 期待値は state から独立に計算した同じ式で作る（文字列表記も同一式）
+      const powerPctOf = (st) => {
+        const sum = { human: 0, zombie: 0 }, max = { human: 0, zombie: 0 };
+        for (const m of st.members) {
+          max[m.faction] += m.maxHp;
+          if (!m.downed) sum[m.faction] += m.hp;
+        }
+        return {
+          human: (sum.human / max.human) * 100, zombie: (sum.zombie / max.zombie) * 100,
+          hText: sum.human + ' / ' + max.human, zText: sum.zombie + ' / ' + max.zombie,
+        };
+      };
+      const jFillH = DOC.getElementById('power-fill-human');
+      const jFillZ = DOC.getElementById('power-fill-zombie');
+      const jNumH = DOC.getElementById('power-num-human');
+      const jNumZ = DOC.getElementById('power-num-zombie');
+      {
+        const p0 = powerPctOf(jStates[0]);
+        checkEq(jFillH.style.width, p0.human + '%', 'S1: 開戦直後の態勢條（人類）');
+        checkEq(jFillZ.style.width, p0.zombie + '%', 'S1: 開戦直後の態勢條（喪屍）');
+        checkEq(jNumH.textContent, p0.hText, 'S1: 開戦直後の數值表記（人類）');
+        checkEq(jNumZ.textContent, p0.zText, 'S1: 開戦直後の數值表記（喪屍）');
+      }
+      let jStep = 0;
+      while (GUI.getMode() === 'live' && jStep < jStates.length) {
+        spy.pump(1);
+        jStep++;
+        const st = jStates[jStep];
+        const p = powerPctOf(st);
+        checkEq(jFillH.style.width, p.human + '%', 'S1(' + jStep + '): 態勢條の幅（人類）');
+        checkEq(jFillZ.style.width, p.zombie + '%', 'S1(' + jStep + '): 態勢條の幅（喪屍）');
+        checkEq(jNumH.textContent, p.hText, 'S1(' + jStep + '): 態勢條の數值（人類）');
+        checkEq(jNumZ.textContent, p.zText, 'S1(' + jStep + '): 態勢條的數值（喪屍）');
+      }
+      checkEq(GUI.getMode(), 'done', '9j: 全拍完走で終局表示へ');
+      checkEq(jStep, jStates.length - 1, '9j: UI の歩数が引擎連鎖と一致（1 pump == 1 step 不変）');
       GUI.resetToConfig();
       checkEq(GUI.getMode(), 'idle', '9j: 検査後は idle へ戻す');
     }

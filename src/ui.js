@@ -13,20 +13,9 @@
 
   // ---- 定数 ----------------------------------------------------------
 
-  // 設定フィールド定義（入力欄の生成と入力値の読み取りに使う）。
-  // 人数上限は 9×9=81 マスに収まる 36（エンジンの validateConfig と一致）
-  var FIELDS = [
-    { key: 'count',   label: '人数',     min: 1,    max: 36 },
-    { key: 'hp',      label: 'HP',      min: 1,    max: 9999 },
-    { key: 'attack',  label: '攻击',    min: 0,    max: 99 },
-    { key: 'agility', label: '敏捷',    min: 0,    max: 99 },
-    { key: 'dmgMin',  label: '伤害下限', min: 0,    max: 9999 },
-    { key: 'dmgMax',  label: '伤害上限', min: 0,    max: 9999 }
-  ];
   var FACTIONS = ['human', 'zombie'];
 
-  // Emoji 美術（人類 / 丧尸 / 倒地 / 勝者）
-  var UNIT_EMOJI = { human: '🧑', zombie: '🧟' };
+  // Emoji 美術（倒地 / 勝者。生存者は兵種表の typeId から引く）
   var DOWNED_EMOJI = '💀';
   var WIN_EMOJI = '🏆';
 
@@ -105,12 +94,24 @@
 
   function setConfigEnabled(enabled) {
     FACTIONS.forEach(function (f) {
-      FIELDS.forEach(function (fd) {
-        $(f + '-' + fd.key).disabled = !enabled;
+      E.UNIT_TYPES[f].forEach(function (t) {
+        $(f + '-' + t.id).disabled = !enabled;
       });
     });
     $('config-placement').disabled = !enabled; // 初期站位も全局設定として一緒にロック
     $('btn-start').disabled = !enabled;
+  }
+
+  // 生存メンバーの Emoji（兵種表を typeId で引く。 typeId の無い旧形 state は
+  // 陣営絵文字へフォールバックする）
+  function unitEmoji(m) {
+    if (m.typeId) {
+      var table = E.UNIT_TYPES[m.faction] || [];
+      for (var i = 0; i < table.length; i++) {
+        if (table[i].id === m.typeId) return table[i].emoji;
+      }
+    }
+    return m.faction === 'human' ? '🧑' : '🧟';
   }
 
   function showScreen(name) {
@@ -130,7 +131,22 @@
 
   // ---- 設定パネル ----------------------------------------------------
 
-  // 両陣営の設定入力欄を組み立てる
+  // 陣営の予算バーを更新する（「已用 X / 32」。超支は over クラスで赤表示）
+  function updateBudget(f) {
+    var used = 0;
+    E.UNIT_TYPES[f].forEach(function (t) {
+      used += (Number($(f + '-' + t.id).value) || 0) * t.cost;
+    });
+    var budget = E.POINT_BUDGET;
+    var bar = $('budget-bar-' + f);
+    bar.children[0].style.width = Math.min(100, (used / budget) * 100) + '%';
+    bar.classList.toggle('over', used > budget);
+    $('budget-num-' + f).textContent = '已用 ' + used + ' / ' + budget;
+  }
+
+  // 両陣営の兵種行＋予算バーを組み立てる（#18 仕様: 編成制）。
+  // 数量入力は id=<faction>-<typeId>、初期値は既定編成。input イベントで
+  // 予算バーを即時更新する
   function buildConfigPanel() {
     var wrap = $('faction-configs');
     FACTIONS.forEach(function (f) {
@@ -139,23 +155,54 @@
       var legend = document.createElement('legend');
       legend.textContent = E.FACTION_LABEL[f];
       fs.appendChild(legend);
-      FIELDS.forEach(function (fd) {
-        var label = document.createElement('label');
-        label.className = 'field';
+      E.UNIT_TYPES[f].forEach(function (t) {
+        var row = document.createElement('label');
+        row.className = 'unit-row';
+        var emoji = document.createElement('span');
+        emoji.className = 'unit-emoji';
+        emoji.textContent = t.emoji;
         var name = document.createElement('span');
-        name.textContent = fd.label;
+        name.className = 'unit-name';
+        name.textContent = t.name;
+        var role = document.createElement('span');
+        role.className = 'unit-role';
+        role.textContent = t.role;
+        var stats = document.createElement('span');
+        stats.className = 'unit-stats';
+        stats.textContent = 'HP ' + t.hp + ' · 攻 ' + t.attack + ' · 敏 ' + t.agility
+          + ' · 伤 ' + t.dmgMin + '–' + t.dmgMax;
+        var cost = document.createElement('span');
+        cost.className = 'unit-cost';
+        cost.textContent = t.cost + ' 点';
         var input = document.createElement('input');
         input.type = 'number';
-        input.id = f + '-' + fd.key;
-        input.min = String(fd.min);
-        input.max = String(fd.max);
+        input.id = f + '-' + t.id;
+        input.min = '0';
+        input.max = '36';
         input.step = '1';
-        input.value = String(E.DEFAULT_CONFIG[f][fd.key]);
-        label.appendChild(name);
-        label.appendChild(input);
-        fs.appendChild(label);
+        input.value = String(E.DEFAULT_CONFIG[f].composition[t.id] || 0);
+        input.addEventListener('input', function () { updateBudget(f); });
+        row.appendChild(emoji);
+        row.appendChild(name);
+        row.appendChild(role);
+        row.appendChild(stats);
+        row.appendChild(cost);
+        row.appendChild(input);
+        fs.appendChild(row);
       });
+      var bar = document.createElement('div');
+      bar.className = 'budget-bar';
+      bar.id = 'budget-bar-' + f;
+      var fill = document.createElement('div');
+      fill.className = 'budget-fill';
+      bar.appendChild(fill);
+      var num = document.createElement('div');
+      num.className = 'budget-num';
+      num.id = 'budget-num-' + f;
+      fs.appendChild(bar);
+      fs.appendChild(num);
       wrap.appendChild(fs);
+      updateBudget(f);
     });
   }
 
@@ -164,11 +211,11 @@
     var cfg = {};
     cfg.placement = $('config-placement').value;
     FACTIONS.forEach(function (f) {
-      var c = {};
-      FIELDS.forEach(function (fd) {
-        c[fd.key] = Number($(f + '-' + fd.key).value);
+      var composition = {};
+      E.UNIT_TYPES[f].forEach(function (t) {
+        composition[t.id] = Number($(f + '-' + t.id).value);
       });
-      cfg[f] = c;
+      cfg[f] = { composition: composition };
     });
     return cfg;
   }
@@ -234,7 +281,7 @@
       var m = state.members[i];
       var r = cardRefs[m.name];
       if (!r) continue;
-      r.emoji.textContent = m.downed ? DOWNED_EMOJI : UNIT_EMOJI[m.faction];
+      r.emoji.textContent = m.downed ? DOWNED_EMOJI : unitEmoji(m);
       var pct = Math.max(0, Math.min(100, (m.hp / m.maxHp) * 100));
       r.fill.style.width = pct + '%';
       if (m.pos) r.card.style.transform = transformFor(m.pos);
@@ -274,7 +321,7 @@
       if (!r) continue;
       var m = memberByName(name);
       if (!m) continue;
-      r.emoji.textContent = m.downed ? DOWNED_EMOJI : UNIT_EMOJI[m.faction];
+      r.emoji.textContent = m.downed ? DOWNED_EMOJI : unitEmoji(m);
       if (m.downed) r.chip.classList.add('downed');
       else r.chip.classList.remove('downed');
       if (name === activeName && !state.finished) r.chip.classList.add('active');

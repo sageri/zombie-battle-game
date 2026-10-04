@@ -2457,13 +2457,83 @@ function main() {
     checkEq(DOC.getElementById('config-screen').hidden, false, '初期は配置画面が見える');
     checkEq(DOC.getElementById('battle-screen').hidden, true, '初期は戦場画面が隠れる');
     checkEq(DOC.getElementById('faction-configs').children.length, 2, '設定パネルは両陣営分');
-    checkEq(DOC.getElementById('human-count').value, '1', '人類人数の初期値');
-    checkEq(DOC.getElementById('human-hp').value, '12', '人類 HP の初期値');
-    checkEq(DOC.getElementById('zombie-hp').value, '9', '喪屍 HP の初期値');
-    checkEq(DOC.getElementById('zombie-attack').value, '5', '喪屍攻撃の初期値');
+    // S6: 各兵種行の数量入力（id=<faction>-<typeId>）が既定編成の値で並ぶ
+    for (const f of ['human', 'zombie']) {
+      for (const t of GE.UNIT_TYPES[f]) {
+        const el = DOC.getElementById(f + '-' + t.id);
+        checkEq(el && el.value, String(GE.DEFAULT_CONFIG[f].composition[t.id] || 0),
+          'S6: ' + f + '/' + t.id + ' の数量入力が既定編成どおり');
+        checkEq(el.disabled, false, 'S6: ' + f + '/' + t.id + ' は未開戦で編集可');
+      }
+      checkEq(DOC.getElementById('budget-num-' + f).textContent, '已用 32 / 32',
+        'S6: ' + f + ' の予算バーは既定編成で恰 32');
+    }
     // 初期站位の全局セレクト（UI 側は選択値を config.placement として渡す）
     checkEq(DOC.getElementById('config-placement').disabled, false,
       '初期站位セレクトは未開戦では編集可');
+
+    // --- S7: 予算バー（数量入力で「已用 X / 32」が同期し、超支で over が付く） ---
+    {
+      const fire = (id) => {
+        const el = DOC.getElementById(id);
+        (el.listeners.input || []).forEach((fn) => fn());
+      };
+      const setVal = (id, v) => { DOC.getElementById(id).value = String(v); fire(id); };
+      const hBar = DOC.getElementById('budget-bar-human');
+      const hNum = DOC.getElementById('budget-num-human');
+      setVal('human-guard', 0); setVal('human-gunner', 0); setVal('human-scout', 0);
+      setVal('human-militia', 1);
+      checkEq(hNum.textContent, '已用 10 / 32', 'S7: 数量入力で予算バーが同期（10 点）');
+      setVal('human-scout', 3);
+      checkEq(hNum.textContent, '已用 34 / 32', 'S7: 34 点の表示');
+      checkEq(hBar.classList.contains('over'), true, 'S7: 超支で over クラスが付く');
+      setVal('human-scout', 2);
+      checkEq(hNum.textContent, '已用 26 / 32', 'S7: 26 点に戻す');
+      checkEq(hBar.classList.contains('over'), false, 'S7: 予算内に戻ると over が外れる');
+      // 既定編成へ戻す（以降の UI 流程テストは既定 trio の画面状態から進む）
+      setVal('human-militia', 0); setVal('human-guard', 1);
+      setVal('human-gunner', 1); setVal('human-scout', 1);
+      checkEq(hNum.textContent, '已用 32 / 32', 'S7: 既定編成に復元（恰 32）');
+    }
+
+    // --- S8: 設定入力 → readConfig → btn-start 経路で編成形状を検証 ---
+    {
+      const clickStart = () => {
+        const el = DOC.getElementById('btn-start');
+        (el.listeners.click || []).forEach((fn) => fn());
+      };
+      const set2 = (id, v) => { DOC.getElementById(id).value = String(v); };
+      const zeroAll = () => {
+        for (const f of ['human', 'zombie']) {
+          for (const t of GE.UNIT_TYPES[f]) set2(f + '-' + t.id, 0);
+        }
+      };
+      GUI.resetToConfig();
+      zeroAll();
+      // DOM 桩の <select> は HTML 既定値を持たないため placement を明示する
+      DOC.getElementById('config-placement').value = 'mixed';
+      set2('human-militia', 1); set2('human-scout', 2);
+      set2('zombie-walker', 1); set2('zombie-horde', 6);
+      clickStart();
+      checkEq(GUI.getMode(), 'live', 'S8: btn-start で開戦できる');
+      checkEq(GUI.getBattleState().members.map((m) => m.name),
+        ['民兵1', '侦察兵1', '侦察兵2', '丧尸1', '尸潮1', '尸潮2', '尸潮3', '尸潮4', '尸潮5', '尸潮6'],
+        'S8: readConfig が編成形状を返し、成員が表序どおり展開される');
+      GUI.resetToConfig();
+      zeroAll();
+      set2('zombie-walker', 1);                          // 丧屍側は正当のまま
+      set2('human-guard', 2); set2('human-gunner', 1);  // 人類 24+12=36 点 > 32
+      clickStart();
+      checkEq(GUI.getMode(), 'idle', 'S8: 予算超過は開戦しない');
+      check(DOC.getElementById('config-error').textContent.includes('超出配点预算'),
+        'S8: 予算超過の中文エラー: ' + DOC.getElementById('config-error').textContent);
+      for (const f of ['human', 'zombie']) {
+        for (const t of GE.UNIT_TYPES[f]) {
+          set2(f + '-' + t.id, GE.DEFAULT_CONFIG[f].composition[t.id] || 0);
+        }
+      }
+      DOC.getElementById('config-error').textContent = '';
+    }
 
     // カード / チップ / 飄字の参照ヘルパ（buildCards の子順に依存:
     // [0]emoji [1]血条(>fill) [2]飄字レイヤー。名前は title 属性）
@@ -2477,8 +2547,8 @@ function main() {
     // --- 9b. 開戦: 2v2。逐次演出をエンジンのステップ連鎖と毎歩突き合わせる ---
     GUI.setSpeed('middle');
     const uiCfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 2, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      human: { composition: { militia: 2 } },
+      zombie: { composition: { walker: 2 } },
     };
     // 混合ランダム配置になった 2v2 は种子ごとに進行が変わるため、
     // hit・倒地・スキップ・移動の 4 種 event がすべて出る种子を固定して使う
@@ -2520,12 +2590,18 @@ function main() {
     checkEq(spy.size(), 1, '予約は 1 件');
     checkEq(DOC.getElementById('config-screen').hidden, true, '戦場では配置画面を隠す');
     checkEq(DOC.getElementById('battle-screen').hidden, false, '戦場画面を表示');
-    check(DOC.getElementById('human-count').disabled === true
-      && DOC.getElementById('human-hp').disabled === true
-      && DOC.getElementById('zombie-attack').disabled === true
-      && DOC.getElementById('config-placement').disabled === true
-      && DOC.getElementById('btn-start').disabled === true,
-      '開戦で設定入力・初期站位・開戦ボタンをロック');
+    {
+      let allLocked = true;
+      for (const f of ['human', 'zombie']) {
+        for (const t of GE.UNIT_TYPES[f]) {
+          if (!DOC.getElementById(f + '-' + t.id).disabled) allLocked = false;
+        }
+      }
+      check(allLocked
+        && DOC.getElementById('config-placement').disabled === true
+        && DOC.getElementById('btn-start').disabled === true,
+        'S6: 開戦で全数量入力・初期站位・開戦ボタンをロック');
+    }
     check(DOC.getElementById('btn-skip').disabled === false, '跳到結果ボタンは有効');
     checkEq(GUI.getBattleState(), refStates[0], '開戦直後の state がエンジン startBattle と一致');
     checkEq(DOC.getElementById('order-strip').children.length, 4, '順序帯は全員分のチップ');
@@ -2646,8 +2722,8 @@ function main() {
     // --- 9e. 跳到結果: 演出中途から一気に終局へ（整場一括と完全一致） ---
     GUI.setSpeed('middle');
     const skipCfg = {
-      human: { count: 3, hp: 15, attack: 4, agility: 3, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 3, hp: 11, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      human: { composition: { militia: 3 } },
+      zombie: { composition: { walker: 3 } },
     };
     const skipRef = GE.runBattle(deepCopy(skipCfg), GE.createRng(779));
     GUI.startBattle(deepCopy(skipCfg), GE.createRng(779));
@@ -2696,12 +2772,18 @@ function main() {
     checkEq(GUI.getLogEntries(), [], '重置でログを破棄');
     checkEq(DOC.getElementById('config-screen').hidden, false, '配置画面を再表示');
     checkEq(DOC.getElementById('battle-screen').hidden, true, '戦場画面を隠す');
-    check(DOC.getElementById('human-count').disabled === false
-      && DOC.getElementById('human-hp').disabled === false
-      && DOC.getElementById('zombie-hp').disabled === false
-      && DOC.getElementById('config-placement').disabled === false
-      && DOC.getElementById('btn-start').disabled === false,
-      '重置で設定入力・初期站位・開戦ボタンが再び編集可');
+    {
+      let allEnabled = true;
+      for (const f of ['human', 'zombie']) {
+        for (const t of GE.UNIT_TYPES[f]) {
+          if (DOC.getElementById(f + '-' + t.id).disabled) allEnabled = false;
+        }
+      }
+      check(allEnabled
+        && DOC.getElementById('config-placement').disabled === false
+        && DOC.getElementById('btn-start').disabled === false,
+        'S6: 重置で全数量入力・初期站位・開戦ボタンが再び編集可');
+    }
     checkEq(DOC.getElementById('battle-grid').children.length, 0, '戦場グリッド（マス＋カード）を破棄');
     checkEq(DOC.getElementById('order-strip').children.length, 0, '順序帯を破棄');
     checkEq(DOC.getElementById('battle-log').children.length, 0, 'ログ表示を破棄');
@@ -2724,7 +2806,7 @@ function main() {
     GUI.resetToConfig();
     threw = false;
     const badUICfg = deepCopy(GE.DEFAULT_CONFIG);
-    badUICfg.human.count = 0;
+    for (const t of GE.UNIT_TYPES.human) badUICfg.human.composition[t.id] = 0;
     try { GUI.startBattle(badUICfg); } catch (e) { threw = true; }
     check(threw, '不正設定の startBattle は例外を投げる');
     checkEq(GUI.getMode(), 'idle', '失敗後も idle のまま');
@@ -2734,9 +2816,11 @@ function main() {
     const savedMax = GE.MAX_STEPS;
     try {
       GE.MAX_STEPS = 5;
+      // 5 歩では誰も倒れない組合せ（militia 12HP 対 rotwalker 18HP、双方の
+      // 伤害 ≤3 → 最大 9 < 両方の HP）で確定的に上限 draw へ落とす
       const drawCfg = {
-        human: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
-        zombie: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
+        human: { composition: { militia: 1 } },
+        zombie: { composition: { rotwalker: 1 } },
       };
       GUI.startBattle(drawCfg, GE.createRng(785));
       spy.pump();
@@ -2757,19 +2841,39 @@ function main() {
     // 複数の倒地を含む一戦（決定論的に選定した固定种子。以後のシーム検査は
     // この一戦を同期スケジューラで全拍駆動して行う）
     {
+      // 異構成の分割戦（scout×4 対 horde×5+walker×1）。move/blocked/倒地を
+      // すべて含む种子を決定論的に探索して固定する（#18: 異構成で検証する）
       const jCfg = {
         placement: 'split',
-        human: { count: 6, hp: 12, attack: 5, agility: 3, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 6, hp: 9, attack: 6, agility: 2, dmgMin: 1, dmgMax: 4 },
+        human: { composition: { scout: 4 } },
+        zombie: { composition: { horde: 5, walker: 1 } },
       };
-      const jSeed = 87;
-      const jrr = GE.createRng(jSeed);
-      const jStates = [GE.startBattle(deepCopy(jCfg), jrr)];
-      const jEvents = [];
-      while (!jStates[jStates.length - 1].finished) {
-        const jr = GE.stepBattle(jStates[jStates.length - 1], jrr);
-        jStates.push(jr.state);
-        jEvents.push(jr.event);
+      let jSeed = 87;
+      let jStates = null;
+      let jEvents = null;
+      for (;;) {
+        const jrr = GE.createRng(jSeed);
+        const candStates = [GE.startBattle(deepCopy(jCfg), jrr)];
+        const candEvents = [];
+        while (!candStates[candStates.length - 1].finished) {
+          const jr = GE.stepBattle(candStates[candStates.length - 1], jrr);
+          candStates.push(jr.state);
+          candEvents.push(jr.event);
+        }
+        const kinds = new Set(candEvents.map(e => e.kind));
+        if (kinds.has('move') && kinds.has('blocked')
+          && candEvents.some(e => e.kind === 'hit' && e.downed === true)) {
+          jStates = candStates;
+          jEvents = candEvents;
+          break;
+        }
+        jSeed++;
+        if (jSeed > 87 + 2000) {
+          pushFailure('9j: move/blocked/倒地が全部出る种子が見つからない');
+          jStates = candStates;
+          jEvents = candEvents;
+          break;
+        }
       }
       check(jEvents.some(e => e.kind === 'move'), '9j: 移動拍を含む');
       check(jEvents.some(e => e.kind === 'blocked'), '9j: 移動不能拍を含む');
@@ -2793,8 +2897,19 @@ function main() {
       spy.delays.length = 0;
       GUI.startBattle(deepCopy(jCfg), GE.createRng(jSeed));
       checkEq(GUI.getMode(), 'live', '9j: 開戦で live へ');
-      checkEq(DOC.getElementById('battle-grid').children.length, 81 + 12,
-        'S7: 6v6 でも #battle-grid の子数は 81+全員分（追加ノードは骨組み層へ）');
+      checkEq(DOC.getElementById('battle-grid').children.length, 81 + jStates[0].members.length,
+        'S7: 異構成でも #battle-grid の子数は 81+全員分（追加ノードは骨組み層へ）');
+      // S9: カード/順序帯の Emoji は兵種表の typeId 由来（#16 S5 の子順凍結は維持）
+      for (const m of jStates[0].members) {
+        const t = GE.UNIT_TYPES[m.faction].find((x) => x.id === m.typeId);
+        check(!!t, 'S9: ' + m.name + ' の typeId が実在');
+        if (t) {
+          checkEq(cardOf(m.name).children[0].textContent, t.emoji,
+            'S9: カード Emoji は兵種专属: ' + m.name);
+          checkEq(chipOf(m.name).children[0].textContent, t.emoji,
+            'S9: 順序帯 Emoji は兵種专属: ' + m.name);
+        }
+      }
 
       // S5/S6: カードの子順は [0]emoji [1]血条 [2]飄字層（既存検査の索引依存）。
       // 名前は末尾に追加する以外許されない。transform は 64px の独立計算と突き合わせる

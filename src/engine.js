@@ -185,7 +185,7 @@
 (function () {
   'use strict';
 
-  // 仕様書のデフォルト値（#18 仕様: 編成制。開箱默认＝特色三人組、恰 32/32 点。
+  // 仕様書の既定値（#18 仕様: 編成制。既定編成＝特色三人組、恰 32/32 点。
   // composition の key は兵種表の全 id を明示する（0 も含む。欠 key は 0 扱い））
   var DEFAULT_CONFIG = {
     placement: 'mixed',

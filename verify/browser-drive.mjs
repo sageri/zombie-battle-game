@@ -695,9 +695,9 @@ async function main() {
       const pos = posMap.get(x.title);
       return pos && x.transform === transformFor(pos);
     });
-    const info2 = memberInfoOf(s.state.members);
+    const step2Info = memberInfoOf(s.state.members);
     const cardOk = (x) => {
-      const m = info2[x.title];
+      const m = step2Info[x.title];
       return !!m && x.emoji === T_EMOJI[m.typeId] && x.fill === '100%' && !x.downed;
     };
     const structOk =
@@ -708,8 +708,8 @@ async function main() {
       JSON.stringify(zombieNames) === JSON.stringify(['丧尸1', '尸潮1', '尸潮2']) &&
       s.humanCards.every(cardOk) &&
       s.zombieCards.every(cardOk) &&
-      s.humanCards.every((x) => info2[x.title] && info2[x.title].faction === 'human') &&
-      s.zombieCards.every((x) => info2[x.title] && info2[x.title].faction === 'zombie') &&
+      s.humanCards.every((x) => step2Info[x.title] && step2Info[x.title].faction === 'human') &&
+      s.zombieCards.every((x) => step2Info[x.title] && step2Info[x.title].faction === 'zombie') &&
       transformOk &&
       s.chips.length === 6 && s.activeCount === 1 && orderOk &&
       (s.state.steps === 0 ? s.chips.find((x) => x.active).id === 'chip-' + s.state.order[0] : true) &&
@@ -1021,8 +1021,8 @@ async function main() {
     writeFileSync(join(ROOT, 'verify', 'battle-log-dump.txt'), c.logLines.join('\n') + '\n', 'utf8');
 
     const ana = analyzeLog(c.logLines);
-    const info5 = memberInfoOf(c.members);
-    const replay = replayValidate(ana, info5);
+    const step5Info = memberInfoOf(c.members);
+    const replay = replayValidate(ana, step5Info);
     const victory = parseVictory(ana.victory);
     const bodyParsed = c.banner.body.split('\n').filter((x) => x.length > 0).map((l) => {
       const m = l.match(/^(.+?)：剩余 HP (\d+)\/(\d+)$/);
@@ -1060,8 +1060,8 @@ async function main() {
 
     // 阵营分区の実測（初期配置に対して）: 人类は列 1..4、丧尸は列 6..9、
     // 中列 5 空置。最終 pos は移動で中列を跨ぐため、order 行の行尾座標で判定する
-    const splitOk = ana.orderParsed.length === 6 && ana.orderParsed.every((o) => o && info5[o.name] && (
-      info5[o.name].faction === 'human'
+    const splitOk = ana.orderParsed.length === 6 && ana.orderParsed.every((o) => o && step5Info[o.name] && (
+      step5Info[o.name].faction === 'human'
         ? (o.pos.col >= 1 && o.pos.col <= 4)
         : (o.pos.col >= 6 && o.pos.col <= 9)));
     const midColEmpty = ana.orderParsed.every((o) => o && o.pos.col !== 5);

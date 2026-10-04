@@ -1200,6 +1200,13 @@ function main() {
       'S4: 名前は全編成で一意');
     check(s.members.every(m => m.name.length <= 4), 'S4: 予算内の名前は 4 字以下');
     check(s.members.some(m => m.name.length === 4), 'S4: 3 字兵種名+番号（侦察兵1）は 4 字に届く');
+    // 字面ケース: 尸潮×10（2 字兵種名の予算内最大編成）——最大编号名「尸潮10」= 4 字
+    const cfgH10 = { human: { composition: { scout: 4 } }, zombie: { composition: { horde: 10 } } };
+    const sH10 = GE.createBattleState(cfgH10);
+    checkEq(GE.validateConfig(cfgH10), [], 'S4: 尸潮×10（30 点）は正当');
+    checkEq(sH10.members.filter(m => m.typeId === 'horde').map(m => m.name)[9], '尸潮10',
+      'S4: 尸潮×10 的最大编号名は「尸潮10」');
+    check(sH10.members.every(m => m.name.length <= 4), 'S4: 尸潮×10 編成でも名前は 4 字以下');
   }
   // --- S2: 校验语义 V1–V8（消息原文・双陣営。T3 の承継） ---
   {

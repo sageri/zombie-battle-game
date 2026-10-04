@@ -322,8 +322,8 @@ const STRUCT_EXPR = `(() => {
   };
 })()`;
 
-// カードの transform 期待値（ui.js の transformFor と CELL_PX=44 に一致）
-const transformFor = (pos) => 'translate(' + (pos.col - 1) * 44 + 'px, ' + (pos.row - 1) * 44 + 'px)';
+// カードの transform 期待値（ui.js の transformFor と CELL_PX=64 に一致。#16 仕様）
+const transformFor = (pos) => 'translate(' + (pos.col - 1) * 64 + 'px, ' + (pos.row - 1) * 64 + 'px)';
 
 // 移動演出の観測プローブ: 移動ログ行数と全カード transform の指紋
 const MOVE_PROBE_EXPR = `(() => ({
@@ -715,12 +715,77 @@ async function main() {
       // 飘字を捕まえられなかった場合のフォールバック証跡
       await shotViewport(cdp, join(SHOT_DIR, '02-battlefield.png'));
     }
+
+    // ---- 表示シームの実測（#16 仕様: 態勢ゲージ / 意図 SVG / 倒地のスポットライト） ----
+    // 態勢ゲージ: 双バーの幅が state からの独立計算（Σ存活hp/ΣmaxHp）と一致するか。
+    // 実 DOM の CSSOM は設定文字列を丸めて読み返す（91.666666…% → 91.6667%）
+    // ため、比較は数値（±0.001%）で行う。スタブ検査（engine.test.mjs）は
+    // 設定文字列そのものを検査しているので両者で役割分担になる
+    const powerPaneOk = await evalJS(cdp, `(() => {
+      const st = window.GameUI.getBattleState();
+      if (!st) return { ok: false, why: 'no state' };
+      const sum = { human: 0, zombie: 0 }, max = { human: 0, zombie: 0 };
+      for (const m of st.members) {
+        max[m.faction] += m.maxHp;
+        if (!m.downed) sum[m.faction] += m.hp;
+      }
+      const g = (id) => document.getElementById(id);
+      const expH = (sum.human / max.human) * 100;
+      const expZ = (sum.zombie / max.zombie) * 100;
+      const near = (v, exp) => v !== undefined && v !== null && !isNaN(parseFloat(v)) && Math.abs(parseFloat(v) - exp) < 0.001;
+      const fh = g('power-fill-human'), fz = g('power-fill-zombie');
+      return {
+        ok: !!fh && !!fz && near(fh.style.width, expH) && near(fz.style.width, expZ),
+        why: 'human=' + (fh ? fh.style.width : 'none') + ' exp=' + expH
+          + ' zombie=' + (fz ? fz.style.width : 'none') + ' exp=' + expZ,
+        num: (g('power-num-human') || {}).textContent + ' / ' + (g('power-num-zombie') || {}).textContent
+      };
+    })()`);
+
+    // 意図 SVG: 「ここから」の移動拍を待ち、移動行の from→to と座標（格中心
+    // 64px の独立計算）を照合（blocked 拍は意図を描かないので移動行のみで待つ）
+    const movesBase = await evalJS(cdp, "document.querySelectorAll('#battle-log .log-action-move').length");
+    const moveAppeared2 = await waitFor(cdp,
+      `document.querySelectorAll('#battle-log .log-action-move').length > ${movesBase}`,
+      30000, 100);
+    const intentSeen = await evalJS(cdp, `(() => {
+      const moves = [...document.querySelectorAll('#battle-log .log-action-move')];
+      const last = moves[moves.length - 1];
+      const svg = document.querySelector('#intent-layer svg');
+      if (!last || !svg) return { ok: false, why: 'no move row or no svg' };
+      const m = last.textContent.match(/（(\\d+),(\\d+)）→（(\\d+),(\\d+)）$/);
+      if (!m) return { ok: false, why: 'unparsable move row: ' + last.textContent };
+      const c = (n) => (n - 0.5) * 64;
+      const line = svg.querySelector('line');
+      const ring = svg.querySelector('circle');
+      const dash = line && line.getAttribute('stroke-dasharray');
+      return {
+        ok: line && ring && dash
+          && Number(line.getAttribute('x1')) === c(+m[2]) && Number(line.getAttribute('y1')) === c(+m[1])
+          && Number(line.getAttribute('x2')) === c(+m[4]) && Number(line.getAttribute('y2')) === c(+m[3])
+          && Number(ring.getAttribute('cx')) === c(+m[4]) && Number(ring.getAttribute('cy')) === c(+m[3]),
+        why: last.textContent + ' line=' + (line ? [line.getAttribute('x1'), line.getAttribute('y1'), line.getAttribute('x2'), line.getAttribute('y2')].join(',') : 'none')
+          + ' ring=' + (ring ? ring.getAttribute('cx') + ',' + ring.getAttribute('cy') : 'none') + ' dash=' + dash,
+        cls: svg.getAttribute('class')
+      };
+    })()`);
+
+    // 倒地拍のスポットライト: 「，倒地！」行が出た拍で #fx-spot に on クラス（中速 800ms＋
+    // 演出尺 900ms の猶予内に観測する。次拍の頭で外れる）
+    const downedWaited = await waitFor(cdp,
+      "[...document.querySelectorAll('#battle-log .log-action-hit')].some((r) => r.textContent.includes('，倒地！'))",
+      60000, 100);
+    const spotSeen = downedWaited ? await evalJS(cdp,
+      "document.getElementById('fx-spot').classList.contains('on')") : false;
+
     const fin = await evalJS(cdp, SNAP_EXPR);
 
-    const passed = structOk && actionsSeen && moveSeen && moveAnimSeen && !!caught && caught.agree;
+    const passed = structOk && actionsSeen && moveSeen && moveAnimSeen && !!caught && caught.agree
+      && powerPaneOk.ok && moveAppeared2 && !!intentSeen.ok && downedWaited && spotSeen;
     return {
       passed, countsSet: { human: hc, zombie: zc }, structOk, actionsSeen, slowed,
       moveSeen, moveAnimSeen, moveProbe: { moves: probe2.moves, blocked: probe2.blocked },
+      powerPaneOk, intentSeen, downedWaited, spotSeen,
       humanNames, zombieNames, chipNames, activeCount: s.activeCount,
       activeChip: s.chips.filter((x) => x.active).map((x) => x.id),
       firstOrderLines: s.logLines.slice(0, 8), logCountAtStart: s.logCount,
@@ -795,8 +860,17 @@ async function main() {
       c.banner.title.includes((c.winner === 'human' ? '人类阵营' : '丧尸阵营')) && c.banner.title.includes('获胜');
     const settledOk = c.activeChips === 0 && c.currentCards === 0 && c.floats === 0;
 
+    // 三級分層の実測（#16: 倒地/初接戦/終局行は log-key、行動行は陣営色）
+    const keyTargets = c.log.filter((x) => x.text.indexOf('，倒地！') >= 0
+      || x.text.indexOf('战斗结束') === 0 || x.text.indexOf('已达 ') === 0);
+    const keyRowsOk = keyTargets.length > 0 && keyTargets.every((x) => (x.cls || '').indexOf('log-key') >= 0);
+    const firstHitRow = c.log.find((x) => (x.cls || '').indexOf('log-action-hit') >= 0);
+    const firstHitKeyOk = !!firstHitRow && firstHitRow.cls.indexOf('log-key') >= 0;
+    const factionRowsOk = c.log.some((x) => x.cls && (x.cls.indexOf(' log-human') >= 0 || x.cls.indexOf(' log-zombie') >= 0));
+
     const passed = done && !c.banner.hidden && titleOk && bodyOk && logVictoryOk &&
-      loserAllDowned && cardsOk && settledOk && replay.violations.length === 0 &&
+      loserAllDowned && cardsOk && settledOk && keyRowsOk && firstHitKeyOk && factionRowsOk &&
+      replay.violations.length === 0 &&
       orderSortedOk(ana) && rerollConsistent(ana);
 
     await fitViewport(cdp, 60);
@@ -807,6 +881,7 @@ async function main() {
       bannerTitle: c.banner.title, bannerBody: c.banner.body, bodyParsed,
       winner: c.winner, survivors: c.survivors, victoryLog: ana.victory, victoryParsed: victory,
       loserFaction, loserAllDowned, cardsOk, settledOk,
+      keyRowsOk, keyRowCount: keyTargets.length, firstHitKeyOk, factionRowsOk,
       counts: (function () { const k = { fail: 0, dodge: 0, hit: 0 }; for (const p of ana.actionsParsed) if (p && k[p.kind] !== undefined) k[p.kind]++; return k; })(),
       rerolls: ana.rerolls.length, rounds: ana.rounds, logLines: c.log.length,
       orderSortedOk: orderSortedOk(ana), rerollConsistent: rerollConsistent(ana),

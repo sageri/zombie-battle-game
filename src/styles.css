@@ -1,156 +1,341 @@
-  :root { color-scheme: light; }
+  /* =====================================================================
+   * 暗色末日テーマ（#16 仕様: 原型 A「転播 HUD」の変数基線。対比度の微調整以外
+   * の色変更は禁止）。最小設計幅 ~1280px — 更窄では横方向スクロールする
+   * ===================================================================== */
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e13; --bg2: #10141c; --panel: #141924; --line: #2a3140;
+    --ink: #c9d4e3; --ink-dim: #7d8aa0;
+    --human: #5ad1c8; --human-deep: #1d6f6a;
+    --zombie: #e5484d; --zombie-deep: #7a1f24;
+    --gold: #e8c268;
+    /* 演出尺（#16 仕様。ui.js の FX_DUR と必ず一致させること） */
+    --dur-shake: .4s;   /* 初接戦: 画面シェイク＋赤縁グロー */
+    --dur-spot: .9s;    /* 倒地: スポットライト暗転 */
+    --dur-freeze: .6s;  /* 終局: フリーズ */
+  }
   * { box-sizing: border-box; }
   body {
     font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
-    max-width: 980px;
+    min-width: 1280px;
     margin: 0 auto;
     padding: 16px;
-    color: #222;
-    background: #fafafa;
+    color: var(--ink);
     line-height: 1.55;
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #182030 0%, transparent 60%),
+      radial-gradient(900px 500px at 50% 115%, #1c1216 0%, transparent 55%),
+      var(--bg);
   }
-  h1 { font-size: 22px; margin: 4px 0 12px; }
-  h2 { font-size: 16px; margin: 10px 0 6px; }
-  .hint { color: #777; font-size: 13px; margin: 2px 0 10px; }
+  /* 廃土の質感: 微かな走査線＋暗隅（画像は使わない。最背面層なので触れない） */
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 3;
+    background:
+      repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 1px, transparent 1px 3px),
+      radial-gradient(140% 100% at 50% 50%, transparent 55%, rgba(0,0,0,.42) 100%);
+  }
+  h1 { font-size: 22px; margin: 4px 0 12px; color: #e7edf5; }
+  h2 { font-size: 16px; margin: 10px 0 6px; color: #e7edf5; }
+  .hint { color: var(--ink-dim); font-size: 13px; margin: 2px 0 10px; }
+
+  /* ---- 配置ページ ------------------------------------------------------ */
   .factions { display: flex; gap: 12px; flex-wrap: wrap; }
   fieldset.faction {
     flex: 1 1 340px;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
     padding: 6px 14px 12px;
     margin: 0;
   }
-  fieldset.faction.human legend { color: #1a5fb4; font-weight: bold; padding: 0 6px; }
-  fieldset.faction.zombie legend { color: #a51d2d; font-weight: bold; padding: 0 6px; }
+  fieldset.faction.human { border-color: rgba(90, 209, 200, .4); }
+  fieldset.faction.zombie { border-color: rgba(229, 72, 77, .4); }
+  fieldset.faction.human legend { color: var(--human); font-weight: bold; padding: 0 6px; }
+  fieldset.faction.zombie legend { color: var(--zombie); font-weight: bold; padding: 0 6px; }
   .field { display: inline-flex; align-items: center; gap: 6px; margin: 6px 14px 2px 0; font-size: 14px; }
-  .field input { width: 84px; padding: 2px 4px; }
-  .field select { padding: 2px 4px; font-size: 14px; }
+  .field input {
+    width: 84px; padding: 4px 6px;
+    background: #0c1017; border: 1px solid var(--line); color: var(--ink);
+    border-radius: 4px;
+  }
+  .field select {
+    padding: 4px 6px; font-size: 14px;
+    background: #0c1017; border: 1px solid var(--line); color: var(--ink);
+    border-radius: 4px;
+  }
+  .field input:focus, .field select:focus { outline: 1px solid var(--human); }
   .field.global-field { margin: 8px 0 2px; font-weight: bold; }
-  .field .field-note { font-weight: normal; color: #777; font-size: 12px; }
-  .error { color: #c01c28; font-size: 14px; min-height: 1.2em; margin: 8px 0 4px; }
+  .field .field-note { font-weight: normal; color: var(--ink-dim); font-size: 12px; }
+  .error { color: #ff7b80; font-size: 14px; min-height: 1.2em; margin: 8px 0 4px; }
   .actions { margin: 4px 0 8px; }
-  button { padding: 6px 20px; font-size: 14px; cursor: pointer; }
-  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  button {
+    padding: 6px 20px; font-size: 14px; cursor: pointer;
+    background: linear-gradient(180deg, #20283a, #161c2a); color: #eaf1fb;
+    border: 1px solid #3b4656; border-radius: 6px;
+  }
+  button:hover { box-shadow: 0 0 12px rgba(90, 209, 200, .25); }
+  button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
   button.small { padding: 1px 10px; font-size: 12px; font-weight: normal; }
 
-  /* ---- 戦場ページ：操作バー ---------------------------------------- */
+  /* ---- 戦場ページ 3 カラム骨組み（#16: 左=態勢ゲージ / 中=戦場 / 右=ログ） -------- */
+  .battle-columns {
+    display: grid;
+    grid-template-columns: 250px minmax(620px, auto) 330px;
+    gap: 16px;
+    align-items: start;
+  }
+  #power-pane { position: sticky; top: 12px; }
+  #power-pane h2 { margin: 2px 0 8px; }
+  .camp-block {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    padding: 10px 12px; margin-bottom: 12px;
+  }
+  .camp-block.human .camp-name { color: var(--human); font-weight: bold; font-size: 13px; margin-bottom: 7px; }
+  .camp-block.zombie .camp-name { color: var(--zombie); font-weight: bold; font-size: 13px; margin-bottom: 7px; }
+  .power-bar { height: 12px; border-radius: 6px; background: #1a212e; overflow: hidden; border: 1px solid #232b3b; }
+  .power-fill { height: 100%; width: 100%; transition: width .5s ease; }
+  .camp-block.human .power-fill { background: linear-gradient(90deg, var(--human-deep), var(--human)); }
+  .camp-block.zombie .power-fill { background: linear-gradient(90deg, var(--zombie-deep), var(--zombie)); }
+  .power-num { font-size: 12px; color: var(--ink-dim); text-align: right; margin-top: 5px; font-variant-numeric: tabular-nums; }
+  #log-pane { position: sticky; top: 12px; }
+  #log-pane h2 { margin: 2px 0 6px; }
+
+  /* ---- 戦場ページ：操作バー -------------------------------------------- */
   .battle-bar { display: flex; align-items: center; gap: 8px; margin: 2px 0 10px; flex-wrap: wrap; }
-  .bar-label { font-size: 14px; color: #555; }
+  .bar-label { font-size: 14px; color: var(--ink-dim); }
   .bar-gap { flex: 1 1 0; }
   .speed-btn { padding: 4px 16px; }
-  .speed-btn.active { background: #1a5fb4; border-color: #1a5fb4; color: #fff; }
+  .speed-btn.active {
+    background: linear-gradient(180deg, #1d4b47, #143230);
+    border-color: var(--human); color: #dffffb;
+    box-shadow: 0 0 10px rgba(90, 209, 200, .3);
+  }
 
-  /* ---- 順序帯 -------------------------------------------------------- */
+  /* ---- 順序帯 ---------------------------------------------------------- */
   #order-strip {
     display: flex; flex-wrap: wrap; gap: 6px;
-    padding: 8px; border: 1px solid #ccc; border-radius: 6px;
-    background: #fff; min-height: 56px;
+    padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); min-height: 56px;
   }
   .chip {
     width: 62px; text-align: center;
-    border: 1px solid #ddd; border-radius: 6px; background: #fff;
+    border: 1px solid var(--line); border-radius: 6px; background: rgba(255, 255, 255, .02);
     padding: 4px 2px 2px; position: relative;
     transition: transform .15s ease, border-color .15s ease,
                 background .15s ease, opacity .2s ease;
   }
+  .chip.human { border-color: rgba(90, 209, 200, .35); }
+  .chip.zombie { border-color: rgba(229, 72, 77, .35); }
   .chip-emoji { font-size: 20px; line-height: 1.2; }
-  .chip-name { font-size: 11px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip-name { font-size: 11px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .chip.active {
     transform: scale(1.18);
-    border-color: #e8a33d; background: #fff7e0;
-    box-shadow: 0 0 8px rgba(232, 163, 61, .75);
+    background: rgba(255, 255, 255, .08);
+    border-color: var(--gold);
+    box-shadow: 0 0 10px rgba(232, 194, 104, .55);
     z-index: 2;
   }
-  .chip.downed { opacity: .45; filter: grayscale(1); }
+  .chip.downed { opacity: .38; filter: grayscale(.9); }
 
-  /* ---- 戦場（9×9 グリッド） ------------------------------------------ */
-  #battlefield { display: flex; justify-content: center; margin: 20px 0 14px; }
-  /* マス辺長 44px は ui.js の CELL_PX と必ず一致させること */
+  /* ---- 戦場（9×9 グリッド） -------------------------------------------- */
+  /* 枠線は #battlefield 側に持たせる（#intent-layer と格子の座標原点を
+     一致させるため。grid は素の 9×9 並びだけにする） */
+  #battlefield {
+    position: relative;
+    display: flex; justify-content: center;
+    margin: 20px 0 14px;
+    border: 1px solid var(--line); border-radius: 8px; background: #070a0f;
+    padding: 6px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .55), inset 0 0 40px rgba(0, 0, 0, .5);
+  }
+  /* マス辺長 64px は ui.js の CELL_PX と必ず一致させること（#16 仕様） */
   #battle-grid {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(9, 44px);
-    grid-template-rows: repeat(9, 44px);
-    border: 2px solid #bbb; border-radius: 6px; background: #fff;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, .08);
+    grid-template-columns: repeat(9, 64px);
+    grid-template-rows: repeat(9, 64px);
   }
-  .grid-cell { border: 1px solid #ececec; }
-  .grid-cell.alt { background: #f6f8f6; }
+  .grid-cell {
+    border: 1px solid #1b212d; background: #0d1119; border-radius: 2px;
+    background-image: linear-gradient(135deg, rgba(255, 255, 255, .015) 25%, transparent 25%);
+  }
+  .grid-cell.alt { background-color: #101623; }
 
-  /* ---- キャラカード（マス内コンパクトカード: Emoji + ミニ血条、名前は title） --- */
+  /* ---- キャラカード（マス内カード: Emoji + ミニ血条 + 常時表示名前） --------- */
   .unit-card {
     position: absolute; left: 0; top: 0;
-    width: 44px; height: 44px;
-    border: 1px solid #ccc; border-radius: 4px; background: #fff;
-    padding: 1px 1px 3px;
+    width: 64px; height: 64px;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .015));
+    padding: 2px 1px 1px;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 1px;
     transition: transform .25s ease, opacity .2s ease, border-color .2s ease, box-shadow .2s ease;
   }
-  .unit-card.human { border-top: 2px solid #1a5fb4; }
-  .unit-card.zombie { border-top: 2px solid #a51d2d; }
-  .unit-card.current { border-color: #e8a33d; box-shadow: 0 0 6px rgba(232, 163, 61, .8); z-index: 3; }
-  /* 倒地はグリッドから即時除去（表示を消す。順序帯は灰化 💀 を保持） */
-  .unit-card.downed { display: none; }
-  .unit-emoji { font-size: 19px; line-height: 1.1; }
-  .hp-bar { width: 34px; height: 5px; background: #e5e5e5; border-radius: 3px; overflow: hidden; }
-  .hp-fill { height: 100%; width: 100%; background: #3fa34d; border-radius: 3px; transition: width .45s ease; }
+  .unit-card.human {
+    border-color: rgba(90, 209, 200, .55); border-top: 2px solid var(--human);
+    box-shadow: 0 0 9px rgba(90, 209, 200, .18);
+  }
+  .unit-card.zombie {
+    border-color: rgba(229, 72, 77, .55); border-top: 2px solid var(--zombie);
+    box-shadow: 0 0 9px rgba(229, 72, 77, .18);
+  }
+  .unit-card.current {
+    border-color: var(--gold); box-shadow: 0 0 10px rgba(232, 194, 104, .65);
+    outline: 1.5px solid rgba(255, 255, 255, .55); outline-offset: 1px;
+    z-index: 3;
+  }
+  /* 倒地（#16 仕様: グレースケール＋スタンプ）: 倒地拍に「倒地」スタンプを押し、
+     そのまま薄れながら消える（JS タイマー不使用。クラスは残すので検査は
+     classList で成立つ） */
+  .unit-card.downed {
+    pointer-events: none;
+    filter: grayscale(1);
+    animation: downed-out 1.5s ease forwards;
+  }
+  .unit-card.downed::after {
+    content: '倒地';
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--zombie); font-weight: 800; font-size: 13px; letter-spacing: .2em;
+    text-indent: .2em;
+    border: 2px solid var(--zombie); border-radius: 4px;
+    background: rgba(11, 14, 19, .72);
+    transform: rotate(-12deg);
+  }
+  @keyframes downed-out {
+    0% { opacity: 1; }
+    55% { opacity: .85; }
+    100% { opacity: 0; }
+  }
+  .unit-emoji { font-size: 26px; line-height: 1.1; }
+  .hp-bar { width: 46px; height: 5px; background: #232a38; border-radius: 3px; overflow: hidden; }
+  .hp-fill { height: 100%; width: 100%; border-radius: 3px; transition: width .45s ease; }
+  .unit-card.human .hp-fill { background: linear-gradient(90deg, var(--human-deep), var(--human)); }
+  .unit-card.zombie .hp-fill { background: linear-gradient(90deg, var(--zombie-deep), var(--zombie)); }
+  /* 常時表示名前（#16 仕様: 4 字超は省略記号。data は全文を保持する。
+     10px 全角 4 字 = 40px が上限なので、5 字目から必ず「…」に丸まる） */
+  .unit-name {
+    max-width: 43px; font-size: 10px; line-height: 1.1; color: var(--ink-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
 
-  /* ---- 飘字（カード頭上に浮かんで消える） ---------------------------- */
+  /* ---- 飘字（カード頭上に浮かんで消える） ------------------------------ */
   .float-layer { position: absolute; left: 0; right: 0; top: -10px; height: 0; pointer-events: none; z-index: 5; }
   .float-text {
     position: absolute; left: 50%; top: 0; transform: translateX(-50%);
-    white-space: nowrap; font-weight: bold; font-size: 13px;
-    text-shadow: 0 0 3px #fff, 0 0 3px #fff;
+    white-space: nowrap; font-weight: bold; font-size: 14px;
+    text-shadow: 0 2px 6px #000;
     animation: float-up .9s ease-out forwards;
   }
-  .float-info { color: #333; }
-  .float-damage { color: #c01c28; font-size: 15px; }
+  .float-info { color: #9fb3d0; font-size: 12px; }
+  .float-damage { color: #ff7b80; font-size: 15px; }
   @keyframes float-up {
     from { opacity: 1; transform: translate(-50%, 0); }
     to   { opacity: 0; transform: translate(-50%, -34px); }
   }
 
-  /* ---- 被弾ライトアニメ（赤フラッシュ + 揺れ） ------------------------ */
-  /* 揺れは margin で表現する。transform はマス位置の保持に使っており、
-     keyframes で transform を書くと原点へ飛んで見えるため触らない */
-  .unit-card.hit-flash { animation: hit-flash .5s ease; }
+  /* ---- 被弾ライトアニメ（赤フラッシュ） -------------------------------- */
+  /* transform はマス位置の保持に使うため触らない（原型 A の hitflash と同じく
+     色の脈動だけに絞る） */
+  .unit-card.hit-flash { animation: hit-flash .38s ease; }
   @keyframes hit-flash {
-    0%   { background: #fff; }
-    25%  { background: #ffd2d2; margin-left: -3px; }
-    50%  { background: #ffb3b3; margin-left: 3px; }
-    75%  { background: #ffd2d2; margin-left: -2px; }
-    100% { background: #fff; margin-left: 0; }
+    0%   { background: rgba(229, 72, 77, .55); }
+    100% { background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .015)); }
   }
 
-  /* ---- 終局バナー ---------------------------------------------------- */
+  /* ---- 意図層・重要シーン演出の覆い（骨組み層。grid の子数は不変） -------- */
+  #intent-layer {
+    position: absolute; left: 6px; top: 6px;   /* #battlefield の padding 6px と一致 */
+    width: 576px; height: 576px;               /* 9×64px。CELL_PX と一致させること */
+    pointer-events: none; z-index: 1; overflow: visible;
+  }
+  /* 意図は次拍の頭で消されるまで残る（~1200ms のフェード＋陣営色のグローが
+     足跡の発光残像を兼ねる） */
+  .intent-svg { position: absolute; left: 0; top: 0; animation: intent-fade 1.2s ease-out forwards; }
+  .intent-svg line { stroke-width: 2; opacity: .8; fill: none; }
+  .intent-svg circle { fill: none; stroke-width: 1.5; opacity: .7; }
+  .intent-svg.intent-human { filter: drop-shadow(0 0 4px rgba(90, 209, 200, .55)); }
+  .intent-svg.intent-zombie { filter: drop-shadow(0 0 4px rgba(229, 72, 77, .55)); }
+  .intent-svg.intent-human line, .intent-svg.intent-human circle { stroke: var(--human); }
+  .intent-svg.intent-zombie line, .intent-svg.intent-zombie circle { stroke: var(--zombie); }
+  @keyframes intent-fade {
+    0% { opacity: 0; }
+    15% { opacity: 1; }
+    70% { opacity: .8; }
+    100% { opacity: 0; }
+  }
+  .fx-redge {
+    position: absolute; inset: 0; border-radius: 8px;
+    pointer-events: none; opacity: 0; z-index: 4;
+  }
+  .fx-redge.on {
+    box-shadow: inset 0 0 0 2px rgba(229, 72, 77, .5), inset 0 0 60px rgba(229, 72, 77, .16);
+    animation: fx-redge var(--dur-shake);
+  }
+  .fx-spot {
+    position: absolute; inset: -80px;
+    pointer-events: none; opacity: 0; z-index: 6;
+    background: radial-gradient(ellipse at center, transparent 28%, rgba(5, 7, 11, .82) 76%);
+  }
+  .fx-spot.on { animation: fx-spot var(--dur-spot); }
+  /* 画面シェイクは transform を #battlefield に掛ける（カードの transform とは独立） */
+  #battlefield.fx-shake { animation: fx-shake var(--dur-shake); }
+  /* 終局のフリーズ（跳到結果でも同じ演出で着地する） */
+  #battlefield.fx-freeze { animation: fx-freeze var(--dur-freeze); }
+  @keyframes fx-redge { 0% { opacity: 0; } 30% { opacity: 1; } 100% { opacity: 0; } }
+  @keyframes fx-spot { 0% { opacity: 0; } 25% { opacity: 1; } 75% { opacity: 1; } 100% { opacity: 0; } }
+  @keyframes fx-shake {
+    0%, 100% { transform: translate(0, 0); }
+    20% { transform: translate(-6px, 3px); }
+    40% { transform: translate(5px, -4px); }
+    60% { transform: translate(-4px, -2px); }
+    80% { transform: translate(3px, 3px); }
+  }
+  @keyframes fx-freeze {
+    0% { filter: saturate(1); }
+    35% { filter: saturate(.35) brightness(1.05); }
+    100% { filter: saturate(.85); }
+  }
+
+  /* ---- 終局バナー ------------------------------------------------------ */
   #battle-banner {
-    border: 2px solid #1a7f37; background: #eaf6ee; border-radius: 6px;
+    border: 1px solid rgba(232, 194, 104, .45); background: rgba(232, 194, 104, .07);
+    border-radius: 8px;
     padding: 10px 16px; margin: 12px 0; text-align: center;
   }
-  #battle-banner.draw { border-color: #b26a00; background: #fff7e0; }
-  #banner-title { font-size: 18px; font-weight: bold; margin: 2px 0; }
-  .banner-body { white-space: pre-line; margin: 2px 0; font-size: 14px; font-family: inherit; }
+  #battle-banner.draw { border-color: rgba(178, 106, 0, .5); background: rgba(178, 106, 0, .1); }
+  #banner-title { font-size: 18px; font-weight: bold; margin: 2px 0; color: var(--gold); }
+  .banner-body { white-space: pre-line; margin: 2px 0; font-size: 14px; font-family: inherit; color: var(--ink); }
 
-  /* ---- 戦闘ログ ------------------------------------------------------ */
+  /* ---- 戦闘ログ（三級分層: 重要行の強調＋行動行の陣営色＋通常行） --------- */
   .log {
     font-family: Consolas, "Courier New", monospace;
     font-size: 13px;
-    border: 1px solid #ccc;
-    background: #fff;
-    border-radius: 6px;
-    padding: 8px 12px;
-    max-height: 460px;
+    border: 1px solid var(--line);
+    background: #0c0f15;
+    border-radius: 8px;
+    padding: 8px 6px;
+    height: 620px;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
   }
-  .log-round { font-weight: bold; color: #666; margin-top: 8px; }
-  .log-order-header { font-weight: bold; margin-top: 4px; }
-  .log-order { color: #333; }
-  .log-reroll { color: #b26a00; }
-  .log-action-fail { color: #9a9a9a; }
-  .log-action-dodge { color: #1c5d99; }
-  .log-action-hit { color: #222; }
-  .log-action-move { color: #5a7d5a; }
-  .log-action-blocked { color: #b26a00; }
-  .log-victory { font-weight: bold; color: #1a7f37; margin-top: 6px; }
+  .log > div { border-left: 2px solid transparent; padding-left: 6px; }
+  .log-round { font-weight: bold; color: #5b6a82; margin-top: 8px; text-align: center; }
+  .log-order-header { font-weight: bold; margin-top: 4px; color: var(--ink); }
+  .log-order { color: var(--ink-dim); }
+  .log-reroll { color: #c99a3f; }
+  .log-action-fail { color: #8a93a5; }
+  .log-action-dodge { color: var(--human); }
+  .log-action-hit { color: #e8989b; }
+  .log-action-move { color: #9fb3d0; }
+  .log-action-blocked { color: #8a7f6a; }
+  .log-victory { font-weight: bold; color: var(--gold); margin-top: 6px; }
+  .log-human { border-left-color: var(--human); }
+  .log-zombie { border-left-color: var(--zombie); }
+  .log-key {
+    font-weight: bold; color: var(--gold);
+    background: rgba(232, 194, 104, .08);
+    border-left-color: var(--gold);
+  }

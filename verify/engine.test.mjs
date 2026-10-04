@@ -120,6 +120,7 @@ function makeFakeElement(tag, id, onRegister) {
     children: [],
     listeners: {},
     style: {},
+    attrs: {},
     textContent: '',
     innerHTML: '',
     value: '',
@@ -150,9 +151,10 @@ function makeFakeElement(tag, id, onRegister) {
     removeChild() { return null; },
     querySelector() { return makeFakeElement('div'); },
     querySelectorAll() { return []; },
-    setAttribute() {},
-    getAttribute() { return null; },
-    removeAttribute() {},
+    // 属性は実装どおり文字列で保持する（意図 SVG の座標検査に必要）
+    setAttribute(k, v) { store.attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(store.attrs, k) ? store.attrs[k] : null; },
+    removeAttribute(k) { delete store.attrs[k]; },
     focus() {}, blur() {}, click() {},
     contains() { return false; },
     getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
@@ -203,6 +205,10 @@ function makeDocumentStub() {
     // createElement で作った要素に id が付いたら document に登録する
     //（実 DOM と同じく getElementById で同じ要素が取れるようにするため）
     createElement(tag) {
+      return makeFakeElement(tag, '', function (vid, el) { byId.set(vid, el); });
+    },
+    // SVG 用（ui.js の意図提示が使う。id 登録の挙動は createElement と同じ）
+    createElementNS(ns, tag) {
       return makeFakeElement(tag, '', function (vid, el) { byId.set(vid, el); });
     },
     createDocumentFragment() { return makeFakeElement('#document-fragment'); },
@@ -354,10 +360,10 @@ function placementDraws(targetCells) {
   });
 }
 
-// UI の transform 文字列（ui.js の transformFor と CELL_PX=44 を模倣）。
-// カードの transform と state の pos の照合に使う
+// UI の transform 文字列（ui.js の transformFor と CELL_PX=64 を模倣）。
+// カードの transform と state の pos の照合に使う（#16 仕様: マスは 64px 固定）
 function transformFor(pos) {
-  return 'translate(' + (pos.col - 1) * 44 + 'px, ' + (pos.row - 1) * 44 + 'px)';
+  return 'translate(' + (pos.col - 1) * 64 + 'px, ' + (pos.row - 1) * 64 + 'px)';
 }
 
 // ----------------------------------------- ステップ実行テスト用の補助
@@ -2416,9 +2422,11 @@ function main() {
         checkEq(transformOf(ev.actor), transformFor(ev.to), '移動後のカード位置が ev.to と一致');
         const mv = refStates[uiSteps].members.find(m => m.name === ev.actor);
         checkEq(transformOf(ev.actor), transformFor(mv.pos), '移動後のカード位置が state pos と一致');
+        // 移動行のクラスは種別＋陣営色（#16: 行動行は陣営色を帯びる）
         checkEq(DOC.getElementById('battle-log')
-          .children[refStates[uiSteps].log.length - 1].className, 'log-action-move',
-          '移動歩のログ行は log-action-move');
+          .children[refStates[uiSteps].log.length - 1].className,
+          'log-action-move log-' + mv.faction,
+          '移動歩のログ行は log-action-move＋行動者陣営色');
       }
     }
     checkEq(GUI.getMode(), 'done', '全ステップ演出で終局表示へ');
@@ -2564,6 +2572,185 @@ function main() {
     checkEq(GE.MAX_STEPS, savedMax, '9i: MAX_STEPS を復元');
     GUI.resetToConfig();
     checkEq(GUI.getMode(), 'idle', 'UI テストは idle で終わる');
+
+    // =============================================== 9j) 表示レイヤ改版（#16 仕様: シーム S1–S8）
+    // 6v6 分区 seed 87 は move/hit/fail/dodge/blocked/skip の全拍種と
+    // 複数の倒地を含む一戦（決定論的に選定した固定种子。以後のシーム検査は
+    // この一戦を同期スケジューラで全拍駆動して行う）
+    {
+      const jCfg = {
+        placement: 'split',
+        human: { count: 6, hp: 12, attack: 5, agility: 3, dmgMin: 1, dmgMax: 3 },
+        zombie: { count: 6, hp: 9, attack: 6, agility: 2, dmgMin: 1, dmgMax: 4 },
+      };
+      const jSeed = 87;
+      const jrr = GE.createRng(jSeed);
+      const jStates = [GE.startBattle(deepCopy(jCfg), jrr)];
+      const jEvents = [];
+      while (!jStates[jStates.length - 1].finished) {
+        const jr = GE.stepBattle(jStates[jStates.length - 1], jrr);
+        jStates.push(jr.state);
+        jEvents.push(jr.event);
+      }
+      check(jEvents.some(e => e.kind === 'move'), '9j: 移動拍を含む');
+      check(jEvents.some(e => e.kind === 'blocked'), '9j: 移動不能拍を含む');
+      check(jEvents.some(e => e.kind === 'hit' && e.downed === true), '9j: 倒地拍を含む');
+
+      // S7/S8: 骨組み検査は DOM スタブでなく index.html 原文に対して行う
+      // （スタブの getElementById は未登録 id を即席生成するため、存在検査に
+      // ならない。原文の静的構造だけが真実源）
+      const htmlSrc = readFileSync(INDEX_HTML_PATH, 'utf8');
+      check(htmlSrc.includes('id="power-pane"'), 'S7: #power-pane が骨組みに実在する');
+      check(htmlSrc.includes('id="log-pane"'), 'S7: #log-pane が骨組みに実在する');
+      check(htmlSrc.includes('id="intent-layer"'), 'S7: #intent-layer が骨組みに実在する');
+      check(/<div id="battlefield"[\s\S]*?<div id="battle-grid"><\/div>\s*<div id="intent-layer"><\/div>/.test(htmlSrc),
+        'S7: #intent-layer は #battle-grid の兄弟として #battlefield 内に置く');
+      check(/<aside id="log-pane"[\s\S]*?id="battle-log"/.test(htmlSrc),
+        'S7: #battle-log は #log-pane 内に移設されている');
+      check(/<section id="config-screen"[^>]*class="[^"]*dark-theme/.test(htmlSrc),
+        'S8: #config-screen に暗色テーマクラスが付く（配色はスクリーンショットで人眼検収）');
+
+      GUI.setSpeed('fast');
+      spy.delays.length = 0;
+      GUI.startBattle(deepCopy(jCfg), GE.createRng(jSeed));
+      checkEq(GUI.getMode(), 'live', '9j: 開戦で live へ');
+      checkEq(DOC.getElementById('battle-grid').children.length, 81 + 12,
+        'S7: 6v6 でも #battle-grid の子数は 81+全員分（追加ノードは骨組み層へ）');
+
+      // S5/S6: カードの子順は [0]emoji [1]血条 [2]飄字層（既存検査の索引依存）。
+      // 名前は末尾に追加する以外許されない。transform は 64px の独立計算と突き合わせる
+      for (const m of jStates[0].members) {
+        const card = DOC.getElementById('card-' + m.name);
+        checkEq(card.children.length, 4, 'S5: カードの子は 4（emoji/血条/飄字/名前）: ' + m.name);
+        checkEq(card.children[0].className, 'unit-emoji', 'S5: [0] は emoji（子順凍結）: ' + m.name);
+        checkEq(card.children[1].className, 'hp-bar', 'S5: [1] は血条（子順凍結）: ' + m.name);
+        checkEq(card.children[2].className, 'float-layer', 'S5: [2] は飄字層（子順凍結）: ' + m.name);
+        checkEq(card.children[3].className, 'unit-name', 'S5: [3] は名前ノード（末尾追加のみ）: ' + m.name);
+        checkEq(card.children[3].textContent, m.name, 'S5: 名前ノードは氏名を常時表示: ' + m.name);
+        checkEq(card.style.transform,
+          'translate(' + (m.pos.col - 1) * 64 + 'px, ' + (m.pos.row - 1) * 64 + 'px)',
+          'S6: マス 64px の transform（独立計算）: ' + m.name);
+      }
+
+      // S1: 態勢ゲージは毎拍「Σ存活hp / ΣmaxHp」（純表示集計）に同期する。
+      // 期待値は state から独立に計算した同じ式で作る（文字列表記も同一式）
+      const powerPctOf = (st) => {
+        const sum = { human: 0, zombie: 0 }, max = { human: 0, zombie: 0 };
+        for (const m of st.members) {
+          max[m.faction] += m.maxHp;
+          if (!m.downed) sum[m.faction] += m.hp;
+        }
+        return {
+          human: (sum.human / max.human) * 100, zombie: (sum.zombie / max.zombie) * 100,
+          hText: sum.human + ' / ' + max.human, zText: sum.zombie + ' / ' + max.zombie,
+        };
+      };
+      const jFillH = DOC.getElementById('power-fill-human');
+      const jFillZ = DOC.getElementById('power-fill-zombie');
+      const jNumH = DOC.getElementById('power-num-human');
+      const jNumZ = DOC.getElementById('power-num-zombie');
+      const jIntent = DOC.getElementById('intent-layer');
+      checkEq(jIntent.children.length, 0, 'S2: 開戦直後の意図層は空');
+      {
+        const p0 = powerPctOf(jStates[0]);
+        checkEq(jFillH.style.width, p0.human + '%', 'S1: 開戦直後の態勢ゲージ（人類）');
+        checkEq(jFillZ.style.width, p0.zombie + '%', 'S1: 開戦直後の態勢ゲージ（喪屍）');
+        checkEq(jNumH.textContent, p0.hText, 'S1: 開戦直後の数値表記（人類）');
+        checkEq(jNumZ.textContent, p0.zText, 'S1: 開戦直後の数値表記（喪屍）');
+      }
+      let jStep = 0;
+      const jFirstHitIdx = jEvents.findIndex((e) => e.kind === 'hit');
+      check(jFirstHitIdx >= 0, '9j: 初接戦（初の命中拍）が存在する');
+      // ログは追記専用なので行番号はどの state でも同一（終局 log で定まる）
+      const jFirstHitRowIdx = jStates[jStates.length - 1].log.findIndex((e) => e.type === 'action-hit');
+      check(jFirstHitRowIdx >= 0, '9j: 初接戦行（初の命中行）が存在する');
+      const jBf = DOC.getElementById('battlefield');
+      const jRedge = DOC.getElementById('fx-redge');
+      const jSpot = DOC.getElementById('fx-spot');
+      while (GUI.getMode() === 'live' && jStep < jStates.length) {
+        spy.pump(1);
+        jStep++;
+        const st = jStates[jStep];
+        const p = powerPctOf(st);
+        checkEq(jFillH.style.width, p.human + '%', 'S1(' + jStep + '): 態勢ゲージの幅（人類）');
+        checkEq(jFillZ.style.width, p.zombie + '%', 'S1(' + jStep + '): 態勢ゲージの幅（喪屍）');
+        checkEq(jNumH.textContent, p.hText, 'S1(' + jStep + '): 態勢ゲージの数値（人類）');
+        checkEq(jNumZ.textContent, p.zText, 'S1(' + jStep + '): 態勢ゲージの数値（喪屍）');
+        // S2: move 拍だけ意図 SVG を描き、それ以外の拍（blocked を含む）は空。
+        // 座標は「マス中心 = (col-0.5)*64」の独立計算と突き合わせる
+        const ev = jEvents[jStep - 1];
+        if (ev.kind === 'move') {
+          checkEq(jIntent.children.length, 1, 'S2(' + jStep + '): move 拍は意図 SVG を 1 枚');
+          const svg = jIntent.children[0];
+          check(svg.tagName.toUpperCase() === 'SVG', 'S2(' + jStep + '): 意図は SVG 要素');
+          const line = svg.children[0];
+          const ring = svg.children[1];
+          checkEq(Number(line.getAttribute('x1')), (ev.from.col - 0.5) * 64, 'S2(' + jStep + '): 破線の始点 x（from マス中心）');
+          checkEq(Number(line.getAttribute('y1')), (ev.from.row - 0.5) * 64, 'S2(' + jStep + '): 破線の始点 y');
+          checkEq(Number(line.getAttribute('x2')), (ev.to.col - 0.5) * 64, 'S2(' + jStep + '): 破線の終点 x（to マス中心）');
+          checkEq(Number(line.getAttribute('y2')), (ev.to.row - 0.5) * 64, 'S2(' + jStep + '): 破線の終点 y');
+          check(!!line.getAttribute('stroke-dasharray'), 'S2(' + jStep + '): 方向線は破線（dasharray 属性）');
+          checkEq(Number(ring.getAttribute('cx')), (ev.to.col - 0.5) * 64, 'S2(' + jStep + '): 目標リングの中心 x');
+          checkEq(Number(ring.getAttribute('cy')), (ev.to.row - 0.5) * 64, 'S2(' + jStep + '): 目標リングの中心 y');
+          const jActorFaction = (st.members.find((mm) => mm.name === ev.actor) || {}).faction;
+          check((svg.getAttribute('class') || '').indexOf('intent-' + jActorFaction) >= 0,
+            'S2(' + jStep + '): 意図は行動者陣営の色クラス');
+        } else {
+          checkEq(jIntent.children.length, 0,
+            'S2(' + jStep + '): ' + ev.kind + ' 拍は意図層が空（blocked は描かない）');
+        }
+        // S3: 重要シーンは「初接戦（初の命中拍）」「倒地」「終局」のみ。回避・
+        // 通常伤害の拍には何の演出クラスも付かない。演出尺が基本遅延を超える
+        // 分だけ次拍の予約遅延が延びる（fast=300ms で検証する）
+        const shakeExpected = jStep === jFirstHitIdx + 1;
+        const spotExpected = ev.kind === 'hit' && ev.downed === true;
+        checkEq(jBf.classList.contains('fx-shake'), shakeExpected,
+          'S3(' + jStep + '): シェイククラスは初接戦拍のみ');
+        checkEq(jRedge.classList.contains('on'), shakeExpected,
+          'S3(' + jStep + '): 赤縁クラスは初接戦拍のみ');
+        checkEq(jSpot.classList.contains('on'), spotExpected,
+          'S3(' + jStep + '): スポットライトクラスは倒地拍のみ');
+        // 普通の回避・伤害の拍それ自体は重要シーン演出を起こさない（初接戦と
+        // 偶然重なった命中拍は除く — そこは「初接戦」の演出として成立つ）
+        if ((ev.kind === 'dodge' || (ev.kind === 'hit' && !ev.downed)) && !shakeExpected) {
+          check(!jBf.classList.contains('fx-shake') && !jSpot.classList.contains('on')
+            && !jBf.classList.contains('fx-freeze'),
+            'S3(' + jStep + '): 回避・通常伤害の拍は重要シーン演出を起こさない');
+        }
+        if (GUI.getMode() === 'live') {
+          const fxMs = Math.max(shakeExpected ? 400 : 0, spotExpected ? 900 : 0);
+          checkEq(spy.delays[spy.delays.length - 1], 300 + Math.max(0, fxMs - 300),
+            'S3(' + jStep + '): 次拍の予約遅延（fast 基本値 300 + 演出尺の超過分）');
+        }
+        // S4: 三級分層 — 重要行（倒地/初接戦/終局）は log-key、行動行は陣営色、
+        // 本文と log-<type> 判定は不変。期待値は log 原文から独立に組み立てる
+        const jLogBox = DOC.getElementById('battle-log');
+        const prevLogLen = jStates[jStep - 1].log.length;
+        for (let li = prevLogLen; li < st.log.length; li++) {
+          const entry = st.log[li];
+          const row = jLogBox.children[li];
+          const expParts = ['log-' + entry.type];
+          const isHitRow = entry.type === 'action-hit';
+          if (entry.type === 'victory' || (isHitRow && (li === jFirstHitRowIdx || entry.text.indexOf('，倒地！') >= 0))) {
+            expParts.push('log-key');
+          }
+          const actorName = entry.text.split(' → ')[0].split(' 移动：')[0].split(' 无法移动')[0];
+          const actorMember = jStates[0].members.find((mm) => mm.name === actorName);
+          if (actorMember) expParts.push('log-' + actorMember.faction);
+          checkEq(row.className, expParts.join(' '),
+            'S4(' + jStep + '/' + li + '): ログ行の三級クラス');
+          checkEq(row.textContent, entry.text, 'S4(' + jStep + '/' + li + '): 本文は一字一句不変');
+        }
+      }
+      checkEq(GUI.getMode(), 'done', '9j: 全拍完走で終局表示へ');
+      checkEq(jStep, jStates.length - 1, '9j: UI の歩数が引擎連鎖と一致（1 pump == 1 step 不変）');
+      checkEq(jIntent.children.length, 0, 'S2: 終局表示で意図層を掃除する');
+      checkEq(jBf.classList.contains('fx-freeze'), true, 'S3: 終局でフリーズクラスが付く');
+      GUI.resetToConfig();
+      checkEq(jBf.classList.contains('fx-freeze'), false, 'S3: 重置でフリーズクラスを外す');
+      checkEq(GUI.getMode(), 'idle', '9j: 検査後は idle へ戻す');
+    }
+
     console.log('[progress] UI flow done, failures=' + failures.length);
   }
 

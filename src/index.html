@@ -18,8 +18,8 @@ GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
 <body>
 <h1>丧尸 vs 人类 自动战斗器</h1>
 
-<!-- 配置ページ（画面 1/2） -->
-<section id="config-screen">
+<!-- 配置ページ（画面 1/2。暗色テーマクラスは #16 仕様 S8 の検査対象） -->
+<section id="config-screen" class="dark-theme">
   <h2>阵营配置</h2>
   <p class="hint">调整两边的角色人数与属性，选择初始站位后点「开战」进入战场页；战斗中配置锁定，点战场页的「重置」可返回本页重新调整。</p>
   <div class="field global-field">
@@ -37,27 +37,49 @@ GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
   </div>
 </section>
 
-<!-- 戦場ページ（画面 2/2） -->
+<!-- 戦場ページ（画面 2/2。3 カラム骨組み: 左=態勢ゲージ / 中=戦場 / 右=ログ） -->
 <section id="battle-screen" hidden>
-  <div class="battle-bar">
-    <span class="bar-label">速度：</span>
-    <button id="speed-slow" class="speed-btn">慢</button>
-    <button id="speed-middle" class="speed-btn">中</button>
-    <button id="speed-fast" class="speed-btn">快</button>
-    <span class="bar-gap"></span>
-    <button id="btn-skip">跳到结果</button>
-    <button id="btn-reset">重置</button>
+  <div class="battle-columns">
+    <aside id="power-pane">
+      <h2>态势</h2>
+      <div class="camp-block human">
+        <div class="camp-name">人类阵营</div>
+        <div class="power-bar"><div class="power-fill" id="power-fill-human"></div></div>
+        <div class="power-num" id="power-num-human"></div>
+      </div>
+      <div class="camp-block zombie">
+        <div class="camp-name">丧尸阵营</div>
+        <div class="power-bar"><div class="power-fill" id="power-fill-zombie"></div></div>
+        <div class="power-num" id="power-num-zombie"></div>
+      </div>
+    </aside>
+    <div id="battlefield-wrap">
+      <div class="battle-bar">
+        <span class="bar-label">速度：</span>
+        <button id="speed-slow" class="speed-btn">慢</button>
+        <button id="speed-middle" class="speed-btn">中</button>
+        <button id="speed-fast" class="speed-btn">快</button>
+        <span class="bar-gap"></span>
+        <button id="btn-skip">跳到结果</button>
+        <button id="btn-reset">重置</button>
+      </div>
+      <div id="order-strip"></div>
+      <div id="battlefield">
+        <div id="battle-grid"></div>
+        <div id="intent-layer"></div>
+        <div id="fx-redge" class="fx-redge"></div>
+        <div id="fx-spot" class="fx-spot"></div>
+      </div>
+      <div id="battle-banner" hidden>
+        <div id="banner-title"></div>
+        <div id="banner-body" class="banner-body"></div>
+      </div>
+    </div>
+    <aside id="log-pane">
+      <h2>战斗日志 <button id="btn-clear-log" class="small">清空日志</button></h2>
+      <div id="battle-log" class="log"></div>
+    </aside>
   </div>
-  <div id="order-strip"></div>
-  <div id="battlefield">
-    <div id="battle-grid"></div>
-  </div>
-  <div id="battle-banner" hidden>
-    <div id="banner-title"></div>
-    <div id="banner-body" class="banner-body"></div>
-  </div>
-  <h2>战斗日志 <button id="btn-clear-log" class="small">清空日志</button></h2>
-  <div id="battle-log" class="log"></div>
 </section>
 
 <script src="engine.js"></script>

@@ -277,10 +277,13 @@
   // 可変＝V9）: 旧「人数+四属性」検査は廃止し、編成（兵種×数量×予算）の
   // 検査に差し替える。placement 分支の文言と判定は原文どおり不変。
   // 予算は両陣営同額。不正な pointBudget は V9 で報告し、判定には既定値を使う。
+  function isBudgetValue(b) {
+    return typeof b === 'number' && isFinite(b) && Math.floor(b) === b && b >= 1 && b <= 9999;
+  }
   function configBudget(config) {
     var b = config ? config.pointBudget : undefined;
     if (b === undefined) return POINT_BUDGET;
-    if (typeof b === 'number' && isFinite(b) && Math.floor(b) === b && b >= 1 && b <= 9999) return b;
+    if (isBudgetValue(b)) return b;
     return POINT_BUDGET;
   }
   api.validateConfig = function (config) {
@@ -293,9 +296,7 @@
     }
     // V9: 配点予算は省略可（既定 100）。指定するなら 1..9999 の整数
     var rawBudget = config ? config.pointBudget : undefined;
-    if (rawBudget !== undefined
-        && !(typeof rawBudget === 'number' && isFinite(rawBudget)
-          && Math.floor(rawBudget) === rawBudget && rawBudget >= 1 && rawBudget <= 9999)) {
+    if (rawBudget !== undefined && !isBudgetValue(rawBudget)) {
       errors.push('配点预算必须是 1～9999 的整数');
     }
     var budget = configBudget(config);

@@ -42,9 +42,14 @@
 ■ GameEngine API 一覧
   --- 定数・乱数・設定検査 ---
   GameEngine.MAX_STEPS                  : 無限ループ防止のステップ上限。書き換え可（既定 100000）
-  GameEngine.DEFAULT_CONFIG             : 既定設定 { placement, human: {...}, zombie: {...} }
+  GameEngine.DEFAULT_CONFIG             : 既定設定 { placement, human: { composition }, zombie: { composition } }
+                                          （#18 編成制。既定は特色三人組＝恰 32/32 点）
   GameEngine.FACTION_LABEL              : 陣営表示名 { human: '人类阵营', zombie: '丧尸阵营' }
-  GameEngine.NAME_PREFIX                : メンバー名の接頭辞 { human: '玩家', zombie: '丧尸' }
+  GameEngine.UNIT_TYPES                 : 兵種表 { human: [4 型], zombie: [5 型] }。各型
+                                          { id, name, role, emoji, hp, attack, agility,
+                                            dmgMin, dmgMax, cost }。表序＝角色の作成順
+  GameEngine.POINT_BUDGET               : 配点予算の既定値（100 点/陣営。両陣営同額。
+                                          config.pointBudget で開戦前に上書き可）
   GameEngine.createRng(seed)            : () => [0,1) の種付き乱数源を返す
   GameEngine.rollD(sides, rng?)         : 1..sides の整数
   GameEngine.randInt(min, max, rng?)    : min..max の整数（両端を含む）
@@ -128,14 +133,23 @@
   config = {
     placement: 'mixed' | 'split'（初期配置モード。省略 / undefined は 'mixed' 扱い。
                 null・空文字・非文字列・その他の値は検査で簡体中文エラー）,
-    human:  { count, hp, attack, agility, dmgMin, dmgMax },
-    zombie: { count, hp, attack, agility, dmgMin, dmgMax }
+    pointBudget: 1..9999 の整数（省略可。配点予算。両陣営同額で既定は 100。
+                不正値は検査で簡体中文エラー、判定には既定値を使う）,
+    human:  { composition: { <typeId>: 数量, ... } },
+    zombie: { composition: { <typeId>: 数量, ... } }
   }
-  * count は各陣営 1..36（9×9=81 マスに収まる上限。36+36=72 ≤ 81）。
+  * composition の key は当該陣営の兵種表の id（UNIT_TYPES 参照）。欠 key は
+    0 扱い、未知 key は検査で簡体中文エラー。数量は各型 0..36 の整数。
+    検査（V1–V9）: 陣営/編成の欠落、未知兵種、数量の非整数、総人数 0、
+    総人数 > 36、総コスト > 予算（既定 100）、予算自体の非整数を
+    簡体中文メッセージで全量収集。
+  * 各陣営の総人数は編成から内生し、1..36（9×9=81 マスに収まる上限。36+36=72 ≤ 81）。
   state = {
-    members:  [ { name, faction: 'human'|'zombie', maxHp, hp, attack,
+    members:  [ { name, faction: 'human'|'zombie', typeId, maxHp, hp, attack,
                   agility, dmgMin, dmgMax, downed,
                   pos } ... ],
+    * name は「兵種名+型内番号」（守卫1、尸潮3 など。同型内は 1 起算）。
+      typeId は JSON 純データ（描画用）。一切の判定に使われない。
     * pos: { row, col }（1 始まりのマス座標。左上が (1,1)）。
       初期配置前は null。値セマンティクスであり、丸ごと置き換えるか、複製時は
       深コピーする（row/col を in-place に書き換えない。浅いクローンが pos の
@@ -154,11 +168,11 @@
                                           action-blocked / victory）
   }
   * 開戦までの経路は「設定検査 → state 生成（pos は null）→ 初期配置 →
-    行動順 d100」の固定順。初期配置は作成順（玩家1..n → 丧尸1..n）に
-    1 人ずつ randInt(0, k-1) で残り空きマス（行列表順）から抽選する
-    （mixed は全 81 マスの共有プール、split は各陣営 36 マスの半区で、
-    中列 5 は空置）。order 行のログは行尾に初期座標を付す:
-    「1. 玩家1（d100=50）（3,4）」。
+    行動順 d100」の固定順。初期配置は作成順（[human, zombie] × 兵種表序 ×
+    型内数量。s.members の並び）に 1 人ずつ randInt(0, k-1) で残り空きマス
+    （行列表順）から抽選する（mixed は全 81 マスの共有プール、split は
+    各陣営 36 マスの半区で、中列 5 は空置）。order 行のログは行尾に初期座標を
+    付す: 「1. 守卫1（d100=50）（3,4）」。
   * 各行動の構造: 上下左右 4 隣接に未倒地の敵がいれば攻撃（隣接集合から
     randInt で 1 人選び、攻撃 d7 → 回避 d7 → 伤害の既存経路）。
     いなければ候補マス（界内かつ未倒地の誰もいない 4 隣接、行列表順）へ
@@ -175,23 +189,47 @@
 (function () {
   'use strict';
 
-  // 仕様書のデフォルト値
+  // 仕様書の既定値（#18 仕様＋2026-10-04 予算改定: 既定 100 点。既定編成＝
+  // 特色三人組 32 点（予算内に余裕）。composition の key は兵種表の全 id を
+  // 明示する（0 も含む。欠 key は 0 扱い））
   var DEFAULT_CONFIG = {
     placement: 'mixed',
-    human:  { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-    zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 }
+    human:  { composition: { militia: 0, guard: 1, gunner: 1, scout: 1 } },
+    zombie: { composition: { walker: 0, rotwalker: 1, shredder: 1, sprinter: 1, horde: 0 } }
   };
 
   // 表示用ラベル（UI 文案は簡体中文）
-  var NAME_PREFIX = { human: '玩家', zombie: '丧尸' };
   var FACTION_LABEL = { human: '人类阵营', zombie: '丧尸阵营' };
+
+  // 兵種表と配点予算（#18 仕様: 編成制。兵種＝固定四属性テンプレート＋
+  // 点数コスト。表序＝その陣営の角色の作成順。均衡型 militia / walker は
+  // 従来の既定属性と同値＝同一シードの戦闘結果が今日と逐条一致する基盤）
+  var UNIT_TYPES = {
+    human: [
+      { id: 'militia',  name: '民兵',   role: '均衡', emoji: '🧑',  hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3, cost: 10 },
+      { id: 'guard',    name: '守卫',   role: '肉盾', emoji: '🛡️', hp: 20, attack: 3, agility: 3, dmgMin: 1, dmgMax: 2, cost: 12 },
+      { id: 'gunner',   name: '枪手',   role: '火力', emoji: '🔫', hp: 8,  attack: 6, agility: 2, dmgMin: 1, dmgMax: 6, cost: 12 },
+      { id: 'scout',    name: '侦察兵', role: '游击', emoji: '🏃', hp: 9,  attack: 3, agility: 6, dmgMin: 1, dmgMax: 3, cost: 8 }
+    ],
+    zombie: [
+      { id: 'walker',    name: '丧尸',   role: '均衡', emoji: '🧟', hp: 9,  attack: 5, agility: 2, dmgMin: 1, dmgMax: 5, cost: 10 },
+      { id: 'rotwalker', name: '腐行者', role: '肉盾', emoji: '🦠', hp: 18, attack: 4, agility: 1, dmgMin: 1, dmgMax: 3, cost: 12 },
+      { id: 'shredder',  name: '撕裂者', role: '火力', emoji: '🩸', hp: 7,  attack: 6, agility: 1, dmgMin: 2, dmgMax: 6, cost: 12 },
+      { id: 'sprinter',  name: '疾行者', role: '游击', emoji: '💨', hp: 8,  attack: 4, agility: 5, dmgMin: 1, dmgMax: 4, cost: 8 },
+      { id: 'horde',     name: '尸潮',   role: '炮灰', emoji: '🐛', hp: 4,  attack: 3, agility: 1, dmgMin: 1, dmgMax: 2, cost: 3 }
+    ]
+  };
+  // 配点予算の既定値（2026-10-04 用户裁决: 32 → 100。config.pointBudget で
+  // 開戦前に上書き可能。両陣営同額の扱いは不変）
+  var POINT_BUDGET = 100;
 
   var api = {
     // 無限ループ防止の安全上限（テストから差し替え可能）
     MAX_STEPS: 100000,
     DEFAULT_CONFIG: DEFAULT_CONFIG,
     FACTION_LABEL: FACTION_LABEL,
-    NAME_PREFIX: NAME_PREFIX
+    UNIT_TYPES: UNIT_TYPES,
+    POINT_BUDGET: POINT_BUDGET
   };
 
   // ---- 乱数 ----------------------------------------------------------
@@ -225,18 +263,29 @@
 
   // ---- 設定検査 ------------------------------------------------------
 
-  // 数値 1 項分の整数・範囲検査
-  function checkInt(errors, label, name, value, min, max) {
-    if (typeof value !== 'number' || !isFinite(value) || Math.floor(value) !== value) {
-      errors.push(label + '的' + name + '必须是整数');
-      return;
+  // 陣営の兵種表から id で型を引く（無ければ null）
+  function typeById(faction, id) {
+    var table = UNIT_TYPES[faction] || [];
+    for (var i = 0; i < table.length; i++) {
+      if (table[i].id === id) return table[i];
     }
-    if (value < min || value > max) {
-      errors.push(label + '的' + name + '必须在 ' + min + '～' + max + ' 之间');
-    }
+    return null;
   }
 
-  // 設定を検査し、不備のメッセージ配列を返す（空配列なら正当）
+  // 設定を検査し、不備のメッセージ配列を返す（空配列なら正当）。
+  // #18 仕様 V1–V8（2026-10-04 追補: 予算は既定 100・config.pointBudget で
+  // 可変＝V9）: 旧「人数+四属性」検査は廃止し、編成（兵種×数量×予算）の
+  // 検査に差し替える。placement 分支の文言と判定は原文どおり不変。
+  // 予算は両陣営同額。不正な pointBudget は V9 で報告し、判定には既定値を使う。
+  function isBudgetValue(b) {
+    return typeof b === 'number' && isFinite(b) && Math.floor(b) === b && b >= 1 && b <= 9999;
+  }
+  function configBudget(config) {
+    var b = config ? config.pointBudget : undefined;
+    if (b === undefined) return POINT_BUDGET;
+    if (isBudgetValue(b)) return b;
+    return POINT_BUDGET;
+  }
   api.validateConfig = function (config) {
     var errors = [];
     // 初期配置モード: 欠落 / undefined のみ 'mixed' の既定扱い。それ以外の
@@ -245,24 +294,54 @@
     if (placement !== undefined && placement !== 'mixed' && placement !== 'split') {
       errors.push('初始站位的取值必须是 mixed 或 split');
     }
+    // V9: 配点予算は省略可（既定 100）。指定するなら 1..9999 の整数
+    var rawBudget = config ? config.pointBudget : undefined;
+    if (rawBudget !== undefined && !isBudgetValue(rawBudget)) {
+      errors.push('配点预算必须是 1～9999 的整数');
+    }
+    var budget = configBudget(config);
     var factions = ['human', 'zombie'];
     for (var i = 0; i < factions.length; i++) {
       var f = factions[i];
       var label = FACTION_LABEL[f];
       var c = config ? config[f] : null;
       if (!c || typeof c !== 'object') {
+        // V1: 陣営設定の欠落 / 非オブジェクト（旧来の文言のまま）
         errors.push(label + '的配置缺失');
         continue;
       }
-      checkInt(errors, label, '人数', c.count, 1, 36);
-      checkInt(errors, label, 'HP', c.hp, 1, 9999);
-      checkInt(errors, label, '攻击', c.attack, 0, 99);
-      checkInt(errors, label, '敏捷', c.agility, 0, 99);
-      checkInt(errors, label, '伤害下限', c.dmgMin, 0, 9999);
-      checkInt(errors, label, '伤害上限', c.dmgMax, 0, 9999);
-      if (typeof c.dmgMin === 'number' && typeof c.dmgMax === 'number'
-          && isFinite(c.dmgMin) && isFinite(c.dmgMax) && c.dmgMin > c.dmgMax) {
-        errors.push(label + '的伤害下限不能大于伤害上限');
+      // V2: 編成の欠落 / 非オブジェクト（旧六字段形状の config はここで拒否される）
+      var comp = c.composition;
+      if (!comp || typeof comp !== 'object') {
+        errors.push(label + '的编成配置缺失');
+        continue;
+      }
+      var total = 0;
+      var cost = 0;
+      for (var key in comp) {
+        if (!Object.prototype.hasOwnProperty.call(comp, key)) continue;
+        var t = typeById(f, key);
+        if (!t) {
+          // V3: 未知の兵種 key
+          errors.push(label + '的编成含有未知兵种：' + key);
+          continue;
+        }
+        var v = comp[key];
+        if (typeof v !== 'number' || !isFinite(v) || Math.floor(v) !== v || v < 0 || v > 36) {
+          // V4: 数量が非整数、または 0..36 の範囲外
+          errors.push(label + '的「' + t.name + '」数量必须是 0～36 的整数');
+          continue;
+        }
+        total += v;
+        cost += v * t.cost;
+      }
+      // V5: 総人数 0（予算内で誰も购置していない）
+      if (total === 0) errors.push(label + '的编成至少要有一名角色');
+      // V6: 総人数が 36 を超える（9×9=81 マスに収まる両陣営合計の上限から）
+      if (total > 36) errors.push(label + '的编成总人数不能超过 36');
+      // V7: 総コストが予算を超える（予算＝config.pointBudget、省略時は既定 100）
+      if (cost > budget) {
+        errors.push(label + '的编成花费 ' + cost + ' 点，超出配点预算 ' + budget + ' 点');
       }
     }
     return errors;
@@ -270,17 +349,19 @@
 
   // ---- state 生成 ----------------------------------------------------
 
-  // メンバー 1 人を生成する（pos は初期配置まで null）
-  function makeMember(faction, index, stats) {
+  // メンバー 1 人を生成する（pos は初期配置まで null。
+  // 名前＝兵種名+型内番号、typeId は JSON 純データで判定には一切使わない）
+  function makeMember(faction, type, index) {
     return {
-      name: NAME_PREFIX[faction] + index,
+      name: type.name + index,
       faction: faction,
-      maxHp: stats.hp,
-      hp: stats.hp,
-      attack: stats.attack,
-      agility: stats.agility,
-      dmgMin: stats.dmgMin,
-      dmgMax: stats.dmgMax,
+      typeId: type.id,
+      maxHp: type.hp,
+      hp: type.hp,
+      attack: type.attack,
+      agility: type.agility,
+      dmgMin: type.dmgMin,
+      dmgMax: type.dmgMax,
       downed: false,
       pos: null
     };
@@ -316,12 +397,22 @@
     };
   }
 
-  // 初期 state を生成する（config は書き換えない。pos は未配置の null）
+  // 初期 state を生成する（config は書き換えない。pos は未配置の null）。
+  // 作成順は「[human, zombie] × 各陣営の兵種表序 × 型内数量」で、
+  // composition の欠 key は 0 扱い（validateConfig 通過後の形状を想定）
   api.createBattleState = function (config) {
     var members = [];
-    var i;
-    for (i = 1; i <= config.human.count; i++) members.push(makeMember('human', i, config.human));
-    for (i = 1; i <= config.zombie.count; i++) members.push(makeMember('zombie', i, config.zombie));
+    var factions = ['human', 'zombie'];
+    for (var fi = 0; fi < factions.length; fi++) {
+      var f = factions[fi];
+      var comp = (config && config[f] && config[f].composition) || {};
+      var table = UNIT_TYPES[f];
+      for (var ti = 0; ti < table.length; ti++) {
+        var t = table[ti];
+        var n = comp[t.id] || 0;
+        for (var k = 1; k <= n; k++) members.push(makeMember(f, t, k));
+      }
+    }
     return {
       members: members,   // 全メンバー（両陣営・作成順）
       order: [],          // 行動順（メンバー名の配列、戦闘中不変）
@@ -381,8 +472,8 @@
     return cells;
   }
 
-  // 初期配置: 作成順（玩家1..n → 丧尸1..n。s.members の並び）に 1 人ずつ
-  // randInt(0, k-1) で「残り空きマス（行列表順）」から 1 マス抽選する
+  // 初期配置: 作成順（[human, zombie] × 兵種表序 × 型内数量。s.members の並び）に
+  // 1 人ずつ randInt(0, k-1) で「残り空きマス（行列表順）」から 1 マス抽選する
   // （k はその時点の残り数。1 人につき乱数はちょうど 1 回）。
   // mixed は両陣営で 1 つの共有プールを消費し、split は各陣営が自分の
   // 半区 36 マスのプールを消費する（互いに重複し得ないため別プールでよい）。

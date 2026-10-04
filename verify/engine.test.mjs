@@ -311,7 +311,7 @@ const RE_REROLL = new RegExp(
   + esc(' 点）重投 d100：') + '(.+)$');
 const RE_REROLL_PAIR = new RegExp('^(.+?)' + esc('→') + '(\\d+)$');
 const RE_ROUND = new RegExp('^' + esc('── 第 ') + '(\\d+)' + esc(' 轮 ──') + '$');
-// 移動行「玩家1 移动：（3,4）→（3,5）」・移動不能行「玩家1 无法移动（无路可走）」
+// 移動行「民兵1 移动：（3,4）→（3,5）」・移動不能行「民兵1 无法移动（无路可走）」
 const RE_MOVE = new RegExp(
   '^(.+?)' + esc(' 移动：') + esc('（') + '(\\d+)' + esc(',') + '(\\d+)'
   + esc('）→（') + '(\\d+)' + esc(',') + '(\\d+)' + esc('）') + '$');
@@ -586,11 +586,10 @@ let GUI = null; // window.GameUI（loadGameEngine が評価時に設定する）
 let DOC = null; // 評価に使った document スタブ（要素の観測用）
 
 // ------------------------------------------------ state 生成ヘルパ
-// 既定設定に上書きをマージし、初期配置と先攻 d100 を制御した初期 state を
-// 作る。開戦経路（startBattle = 検査 → state 生成 → 初期配置 → 先攻）を
-// RngScript で駆動するため、乱数消費順は「配置（1 人 1 回）→ d100」。
-// opts.pos: メンバー作成順の目標セル一覧（省略時は下記の隣接既定配置）。
-// rolls を指定しなければ first 側が 90,89…、もう一方は 40,39…（同点なし）。
+// 直構 state ヘルパ（#18 T4）: 任意属性の境界シナリオは config を経由せず
+// state を直接組み立てる（stepBattle / takeTurn は state しか読まず config を
+// 再検査しないため）。opts は旧来の形状（既定属性への上書き指定）を保つ。
+// 名前は 民兵n / 丧尸n（均衡型。旧 玩家n からの T5 同步置換）。
 function defaultPos(h, z) {
   // 1v1: (1,1) と (1,2)。2v1: 丧尸1 の四隣のうち 2 マスに 2 人類を取り、
   // 全員が誰か 1 体と隣接する形（攻撃境界テストがその前提で組まれている）
@@ -599,28 +598,29 @@ function defaultPos(h, z) {
   throw new Error('makeState: この構成の既定配置はないので opts.pos を指定してください');
 }
 function makeState(opts) {
-  const human = { ...GE.DEFAULT_CONFIG.human, ...(opts.human || {}) };
-  const zombie = { ...GE.DEFAULT_CONFIG.zombie, ...(opts.zombie || {}) };
-  const cfg = { human, zombie };
-  const n = human.count + zombie.count;
-  const cells = opts.pos || defaultPos(human.count, zombie.count);
+  const stats = craftStats(opts);
+  const n = stats.human.count + stats.zombie.count;
+  const cells = opts.pos || defaultPos(stats.human.count, stats.zombie.count);
   checkEq(cells.length, n, 'makeState: 目標セルはメンバー数分');
-  const draws = placementDraws(cells);
+  const s0 = craftInitial(stats);
+  s0.members.forEach((m, i) => {
+    check(inBounds9(cells[i]), 'makeState: pos は界内');
+    m.pos = { row: cells[i].row, col: cells[i].col };
+  });
   const hRolls = opts.humanRolls
-    || Array.from({ length: human.count }, (_, i) => (opts.first === 'human' ? 90 - i : 40 - i));
+    || Array.from({ length: stats.human.count }, (_, i) => (opts.first === 'human' ? 90 - i : 40 - i));
   const zRolls = opts.zombieRolls
-    || Array.from({ length: zombie.count }, (_, i) => (opts.first === 'zombie' ? 90 - i : 40 - i));
+    || Array.from({ length: stats.zombie.count }, (_, i) => (opts.first === 'zombie' ? 90 - i : 40 - i));
   const rs = new RngScript();
-  for (const d of draws) rs.pushInt(d.v, 0, d.k - 1);
   for (const v of hRolls) rs.pushDie(v, 100);
   for (const v of zRolls) rs.pushDie(v, 100);
-  const s = GE.startBattle(cfg, rs.rng);
-  checkEq(rs.used, n * 2, 'makeState: 初期配置（人数分）＋先攻 d100（人数分）だけ消費');
-  // 抽選列どおりのセルに落ちたこと（=抽選アルゴリズムの裏取り）も毎回確認
+  const s = GE.rollInitiative(s0, rs.rng);
+  checkEq(rs.used, n, 'makeState: 先攻 d100（人数分）だけ消費（pos は直置き）');
+  // 直置きセルどおりに配置されたこと（craftInitial の作成順と突き合わせ）も毎回確認
   s.members.forEach((m, i) => {
     checkEq(m.pos, cells[i], 'makeState: ' + m.name + ' の初期配置は目標セルと一致');
   });
-  return { state: s, cfg };
+  return { state: s };
 }
 
 // 手作り state: config + 作成順の pos + 作成順の d100 出目から、
@@ -637,6 +637,69 @@ function placedState(cfg, posByCreation, rollsByCreation) {
   for (const v of rollsByCreation) rs.pushDie(v, 100);
   s = GE.rollInitiative(s, rs.rng);
   checkEq(rs.used, rollsByCreation.length, 'placedState: 先攻 d100 だけ消費');
+  return s;
+}
+
+// ------------------------------------------------ 編成制ヘルパ（#18 T4/T5）
+// 均衡型 composition（militia / walker を n 体）＝旧「N 人の既定属性」と同じ
+// 四属性・作成順を表す正規の設定形状。均一規模シナリオはこれで本物の開戦経路
+// （startBattle / runBattle）を通す。
+function compoUniform(h, z, placement) {
+  const cfg = {
+    human: { composition: { militia: h } },
+    zombie: { composition: { walker: z } },
+  };
+  if (placement !== undefined) cfg.placement = placement;
+  return cfg;
+}
+
+// 任意属性ブロック（均衡型の既定値への上書きマージ。旧 makeState の入力形状）
+function craftStats(overrides) {
+  const out = {};
+  for (const f of ['human', 'zombie']) {
+    const base = f === 'human'
+      ? { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 }
+      : { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 };
+    out[f] = Object.assign({}, base, (overrides && overrides[f]) || {});
+  }
+  return out;
+}
+
+// 任意属性の未配置 state を直構する（typeId は均衡型。名前は 民兵n / 丧尸n）
+function craftInitial(stats) {
+  const members = [];
+  for (const f of ['human', 'zombie']) {
+    const s = stats[f];
+    for (let i = 1; i <= s.count; i++) {
+      members.push({
+        name: (f === 'human' ? '民兵' : '丧尸') + i,
+        faction: f,
+        typeId: f === 'human' ? 'militia' : 'walker',
+        maxHp: s.hp, hp: s.hp,
+        attack: s.attack, agility: s.agility,
+        dmgMin: s.dmgMin, dmgMax: s.dmgMax,
+        downed: false, pos: null,
+      });
+    }
+  }
+  return {
+    members: members, order: [], rolls: {}, turnIndex: 0, round: 0, steps: 0,
+    finished: false, winner: null, survivors: [], log: [],
+  };
+}
+
+// craftInitial ＋ pos 直置き ＋ 先攻 d100 スクリプト（placedState の直構版）
+function craftPlaced(stats, posByCreation, rollsByCreation) {
+  const s0 = craftInitial(stats);
+  checkEq(posByCreation.length, s0.members.length, 'craftPlaced: pos はメンバー数分');
+  s0.members.forEach((m, i) => {
+    check(inBounds9(posByCreation[i]), 'craftPlaced: pos は界内');
+    m.pos = { row: posByCreation[i].row, col: posByCreation[i].col };
+  });
+  const rs = new RngScript();
+  for (const v of rollsByCreation) rs.pushDie(v, 100);
+  const s = GE.rollInitiative(s0, rs.rng);
+  checkEq(rs.used, rollsByCreation.length, 'craftPlaced: 先攻 d100 だけ消費');
   return s;
 }
 
@@ -727,18 +790,17 @@ function verifyActionEntry(e, sim, label) {
 function verifyStateAndLog(state, cfg, label) {
   const n = state.members.length;
 
-  // 再生用: name → 陣営設定由来の初期値（pos は order 行の行尾座標から復元）
+  // 再生用: name → 初期値（#18 編成制は faction 設定に属性が無いため、
+  // 戦闘中不変の maxHp / attack / agility / 伤害区間 を最終 state から復元する）
   const sim = {};
   for (const m of state.members) {
-    const c = cfg[m.faction];
-    check(!!c, label + ': config に陣営 ' + m.faction + ' の設定がある');
     sim[m.name] = {
       faction: m.faction,
-      hp: c ? c.hp : m.maxHp,
-      attack: c ? c.attack : m.attack,
-      agility: c ? c.agility : m.agility,
-      dmgMin: c ? c.dmgMin : m.dmgMin,
-      dmgMax: c ? c.dmgMax : m.dmgMax,
+      hp: m.maxHp,
+      attack: m.attack,
+      agility: m.agility,
+      dmgMin: m.dmgMin,
+      dmgMax: m.dmgMax,
       downed: false,
       pos: null,
     };
@@ -848,7 +910,7 @@ function verifyStateAndLog(state, cfg, label) {
       check(!seenCells.has(key), label + ': 初期配置は互いに重複しない: ' + key);
       seenCells.add(key);
       if (cfg.placement === 'split') {
-        const isHuman = op.name.startsWith('玩家');
+        const isHuman = !!sim[op.name] && sim[op.name].faction === 'human';
         check(isHuman ? (op.pos.col >= 1 && op.pos.col <= 4)
             : (op.pos.col >= 6 && op.pos.col <= 9),
           label + ': split 配置は自陣営の半区に収まる: ' + op.name + ' ' + key);
@@ -961,7 +1023,7 @@ function main() {
   if (!GE) throw new Error('GameEngine を取得できなかったため、以降の検証を継続できない');
 
   // --- API 表面（src/engine.js 冒頭コメントの公表 API） ---
-  for (const k of ['MAX_STEPS', 'DEFAULT_CONFIG', 'FACTION_LABEL', 'NAME_PREFIX',
+  for (const k of ['MAX_STEPS', 'DEFAULT_CONFIG', 'FACTION_LABEL', 'UNIT_TYPES', 'POINT_BUDGET',
     'createRng', 'rollD', 'randInt', 'validateConfig', 'createBattleState',
     'rollInitiative', 'takeTurn', 'runBattle']) {
     check(typeof GE[k] !== 'undefined', 'GameEngine.' + k + ' が公開されている');
@@ -981,6 +1043,61 @@ function main() {
   }
   console.log('[progress] engine loaded, failures=' + failures.length);
 
+  // --- S1 兵種表と配点予算（#18 仕様: 編成制の前提データ。期待値は仕様表の独立写し） ---
+  {
+    check(!!GE.UNIT_TYPES && typeof GE.UNIT_TYPES === 'object',
+      'S1: GameEngine.UNIT_TYPES が公開されている');
+    checkEq(GE.POINT_BUDGET, 100, 'S1: POINT_BUDGET の既定は 100（2026-10-04 用户裁决。両陣営同額は不変）');
+    const S1_TABLE = {
+      human: [
+        { id: 'militia',  name: '民兵',   role: '均衡', emoji: '🧑',  hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3, cost: 10 },
+        { id: 'guard',    name: '守卫',   role: '肉盾', emoji: '🛡️', hp: 20, attack: 3, agility: 3, dmgMin: 1, dmgMax: 2, cost: 12 },
+        { id: 'gunner',   name: '枪手',   role: '火力', emoji: '🔫', hp: 8,  attack: 6, agility: 2, dmgMin: 1, dmgMax: 6, cost: 12 },
+        { id: 'scout',    name: '侦察兵', role: '游击', emoji: '🏃', hp: 9,  attack: 3, agility: 6, dmgMin: 1, dmgMax: 3, cost: 8 },
+      ],
+      zombie: [
+        { id: 'walker',    name: '丧尸',   role: '均衡', emoji: '🧟', hp: 9,  attack: 5, agility: 2, dmgMin: 1, dmgMax: 5, cost: 10 },
+        { id: 'rotwalker', name: '腐行者', role: '肉盾', emoji: '🦠', hp: 18, attack: 4, agility: 1, dmgMin: 1, dmgMax: 3, cost: 12 },
+        { id: 'shredder',  name: '撕裂者', role: '火力', emoji: '🩸', hp: 7,  attack: 6, agility: 1, dmgMin: 2, dmgMax: 6, cost: 12 },
+        { id: 'sprinter',  name: '疾行者', role: '游击', emoji: '💨', hp: 8,  attack: 4, agility: 5, dmgMin: 1, dmgMax: 4, cost: 8 },
+        { id: 'horde',     name: '尸潮',   role: '炮灰', emoji: '🐛', hp: 4,  attack: 3, agility: 1, dmgMin: 1, dmgMax: 2, cost: 3 },
+      ],
+    };
+    checkEq(GE.UNIT_TYPES.human.length, 4, 'S1: 人類兵種は 4 型');
+    checkEq(GE.UNIT_TYPES.zombie.length, 5, 'S1: 丧屍兵種は 5 型');
+    for (const f of ['human', 'zombie']) {
+      const ids = new Set();
+      for (const t of GE.UNIT_TYPES[f]) {
+        checkEq(t, S1_TABLE[f].find((x) => x.id === t.id),
+          'S1: 兵種表 ' + f + '/' + t.id + ' は仕様表どおり（全字段独立写し）');
+        check(!ids.has(t.id), 'S1: 兵種 id は陣営内で一意: ' + t.id);
+        ids.add(t.id);
+        check(Number.isInteger(t.cost) && t.cost > 0, 'S1: cost は正の整数: ' + f + '/' + t.id);
+        check(t.hp >= 1 && t.hp <= 9999, 'S1: hp は旧数値境界 1..9999: ' + f + '/' + t.id);
+        check(t.attack >= 0 && t.attack <= 99, 'S1: attack は旧数値境界 0..99: ' + f + '/' + t.id);
+        check(t.agility >= 0 && t.agility <= 99, 'S1: agility は旧数値境界 0..99: ' + f + '/' + t.id);
+        check(t.dmgMin >= 0 && t.dmgMin <= 9999 && t.dmgMax >= 0 && t.dmgMax <= 9999,
+          'S1: 伤害区間は旧数値境界 0..9999: ' + f + '/' + t.id);
+        check(t.dmgMin <= t.dmgMax, 'S1: 伤害下限 ≤ 上限: ' + f + '/' + t.id);
+        check(typeof t.emoji === 'string' && t.emoji.length > 0, 'S1: emoji は空でない: ' + f + '/' + t.id);
+        check(t.cost <= GE.POINT_BUDGET, 'S1: 単体コストは予算内: ' + f + '/' + t.id);
+      }
+      // 裏取り: 期待表側の id もすべて実表に現れる（両方向の過不足なし）
+      for (const x of S1_TABLE[f]) {
+        check(GE.UNIT_TYPES[f].some((t) => t.id === x.id), 'S1: 仕様表の ' + x.id + ' が実表に存在: ' + f);
+      }
+    }
+    // 均衡型＝現行既定属性（militia / walker。同种子战斗与今日逐条一致的基盤）
+    const m = GE.UNIT_TYPES.human.find((t) => t.id === 'militia');
+    checkEq({ hp: m.hp, attack: m.attack, agility: m.agility, dmgMin: m.dmgMin, dmgMax: m.dmgMax },
+      { hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
+      'S1: militia の四属性は旧 human 既定値と一致');
+    const w = GE.UNIT_TYPES.zombie.find((t) => t.id === 'walker');
+    checkEq({ hp: w.hp, attack: w.attack, agility: w.agility, dmgMin: w.dmgMin, dmgMax: w.dmgMax },
+      { hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      'S1: walker の四属性は旧 zombie 既定値と一致');
+  }
+
   // --- ダイス・スクリプトヘルパの裏付け（rollD / randInt の公表セマンティクス） ---
   checkEq(GE.rollD(7, () => 0), 1, 'rollD(7) の下端');
   checkEq(GE.rollD(7, () => rawForDie(7, 7)), 7, 'rollD(7) の上端');
@@ -999,78 +1116,218 @@ function main() {
   }
   checkEq(GE.randInt(3, 3, () => 0.5), 3, 'randInt(min==max) は常に min');
 
-  // --- 既定値・命名・設定検査 ---
-  checkEq(GE.DEFAULT_CONFIG.placement, 'mixed', 'placement の既定値は mixed');
-  checkEq(GE.DEFAULT_CONFIG.human,
-    { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-    'human の既定値は仕様どおり');
-  checkEq(GE.DEFAULT_CONFIG.zombie,
-    { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    'zombie の既定値は仕様どおり');
-  checkEq(GE.validateConfig(GE.DEFAULT_CONFIG), [], '既定設定は正当');
+  // --- 既定値・命名・設定検査（#18 仕様: 編成制。T2/T3/S2/S3/S4） ---
+  checkEq(GE.DEFAULT_CONFIG, {
+    placement: 'mixed',
+    human: { composition: { militia: 0, guard: 1, gunner: 1, scout: 1 } },
+    zombie: { composition: { walker: 0, rotwalker: 1, shredder: 1, sprinter: 1, horde: 0 } },
+  }, 'T2: 既定設定は特色三人組（composition 形状・32 点/予算 100）');
+  checkEq(GE.validateConfig(GE.DEFAULT_CONFIG), [], '既定設定は正当（恰 32 点は合法）');
   {
-    const cfgN = {
-      human: { count: 3, hp: 10, attack: 3, agility: 2, dmgMin: 1, dmgMax: 2 },
-      zombie: { count: 2, hp: 7, attack: 6, agility: 1, dmgMin: 2, dmgMax: 4 },
-    };
-    const s = GE.createBattleState(cfgN);
-    checkEq(s.members.map(m => m.name), ['玩家1', '玩家2', '玩家3', '丧尸1', '丧尸2'],
-      '命名は 玩家n / 丧尸n の自増');
+    // T2: 均衡型の四属性＝旧既定値の逐値承接（期待値は旧仕様の独立写し）
+    const militia = GE.UNIT_TYPES.human.find(t => t.id === 'militia');
+    checkEq({ hp: militia.hp, attack: militia.attack, agility: militia.agility, dmgMin: militia.dmgMin, dmgMax: militia.dmgMax },
+      { hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
+      'T2: 人類均衡型（militia）は旧 human 既定値と同値');
+    const walker = GE.UNIT_TYPES.zombie.find(t => t.id === 'walker');
+    checkEq({ hp: walker.hp, attack: walker.attack, agility: walker.agility, dmgMin: walker.dmgMin, dmgMax: walker.dmgMax },
+      { hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      'T2: 丧屍均衡型（walker）は旧 zombie 既定値と同値');
+  }
+  // --- S3: 既定編成 → メンバー展開（名前/typeId/属性/表序） ---
+  {
+    const s = GE.createBattleState(GE.DEFAULT_CONFIG);
+    checkEq(s.members.map(m => m.name),
+      ['守卫1', '枪手1', '侦察兵1', '腐行者1', '撕裂者1', '疾行者1'],
+      'S3: 既定編成は 6 員を表順（human 全型が zombie に先立つ）で展開');
+    checkEq(s.members.map(m => m.typeId),
+      ['guard', 'gunner', 'scout', 'rotwalker', 'shredder', 'sprinter'],
+      'S3: typeId は兵種表の id');
+    const tmpl = {};
+    for (const f of ['human', 'zombie']) for (const t of GE.UNIT_TYPES[f]) tmpl[f + '/' + t.id] = t;
     for (const m of s.members) {
-      const c = cfgN[m.faction];
-      checkEq(
-        { hp: m.hp, maxHp: m.maxHp, attack: m.attack, agility: m.agility,
-          dmgMin: m.dmgMin, dmgMax: m.dmgMax, downed: m.downed, faction: m.faction },
-        { hp: c.hp, maxHp: c.hp, attack: c.attack, agility: c.agility,
-          dmgMin: c.dmgMin, dmgMax: c.dmgMax, downed: false, faction: m.faction },
-        'メンバー ' + m.name + ' は設定値を反映');
+      const t = tmpl[m.faction + '/' + m.typeId];
+      check(!!t, 'S3: ' + m.name + ' の typeId が実在の兵種');
+      if (t) {
+        checkEq(
+          { name: m.name, maxHp: m.maxHp, hp: m.hp, attack: m.attack, agility: m.agility,
+            dmgMin: m.dmgMin, dmgMax: m.dmgMax, downed: m.downed, faction: m.faction },
+          { name: t.name + '1', maxHp: t.hp, hp: t.hp, attack: t.attack, agility: t.agility,
+            dmgMin: t.dmgMin, dmgMax: t.dmgMax, downed: false, faction: m.faction },
+          'S3: ' + m.name + ' の属性は兵種テンプレートどおり');
+      }
     }
-    checkEq(s.members.map(m => m.pos), [null, null, null, null, null],
+    checkEq(s.members.map(m => m.pos), [null, null, null, null, null, null],
       '初期 state の pos は未配置の null（初期配置は開戦経路で行う）');
     checkEq(s.order, [], '初期 state の order は空');
     checkEq(s.rolls, {}, '初期 state の rolls は空');
     checkEq(s.finished, false, '初期 state の finished');
     checkEq(s.winner, null, '初期 state の winner');
   }
+  // --- 命名（T5: 名字語義＝兵種名+型内番号。丧屍名は従来どおり） ---
   {
-    // 人数 0 は不可（開戦時 各陣営 1 人以上、上限は 9×9 に収まる 36）
-    const bad = deepCopy(GE.DEFAULT_CONFIG);
-    bad.human.count = 0;
-    const errs = GE.validateConfig(bad);
-    check(errs.length >= 1 && errs.join('；').includes('人数'),
-      '人数 0 は検査に引っかかる: ' + JSON.stringify(errs));
-    let threw = false;
-    try { GE.runBattle(bad, GE.createRng(2)); } catch (e) { threw = true; }
-    check(threw, '不正設定で runBattle は例外を投げる');
-    const bad2 = deepCopy(GE.DEFAULT_CONFIG);
-    bad2.zombie.dmgMin = 5; bad2.zombie.dmgMax = 2;
-    check(GE.validateConfig(bad2).some(t => t.includes('伤害下限')),
-      'dmgMin > dmgMax は検査に引っかかる');
-    const bad3 = deepCopy(GE.DEFAULT_CONFIG);
-    bad3.human.hp = 1.5;
-    check(GE.validateConfig(bad3).some(t => t.includes('HP')),
-      '非整数は検査に引っかかる');
-    // 人数の上限は 36（1..36 は正当、37 はエラーで文言に 36 を含む）
-    for (const v of [1, 36]) {
-      const okCfg = deepCopy(GE.DEFAULT_CONFIG);
-      okCfg.human.count = v; okCfg.zombie.count = v;
-      checkEq(GE.validateConfig(okCfg), [], '人数 ' + v + ' は正当（1..36 の境界）');
+    const cfgN = { human: { composition: { militia: 3 } }, zombie: { composition: { walker: 2 } } };
+    const s = GE.createBattleState(cfgN);
+    checkEq(s.members.map(m => m.name), ['民兵1', '民兵2', '民兵3', '丧尸1', '丧尸2'],
+      '命名は 兵種名+型内番号 の自増（均衡型は 民兵n / 丧尸n）');
+    const militia = GE.UNIT_TYPES.human.find(x => x.id === 'militia');
+    const walker = GE.UNIT_TYPES.zombie.find(x => x.id === 'walker');
+    for (const m of s.members) {
+      const t = m.faction === 'human' ? militia : walker;
+      checkEq(
+        { hp: m.hp, maxHp: m.maxHp, attack: m.attack, agility: m.agility,
+          dmgMin: m.dmgMin, dmgMax: m.dmgMax, downed: m.downed, faction: m.faction },
+        { hp: t.hp, maxHp: t.hp, attack: t.attack, agility: t.agility,
+          dmgMin: t.dmgMin, dmgMax: t.dmgMax, downed: false, faction: m.faction },
+        'メンバー ' + m.name + ' は兵種テンプレートの設定値を反映');
     }
-    for (const v of [-1, 37, 99]) {
-      const ngCfg = deepCopy(GE.DEFAULT_CONFIG);
-      ngCfg.human.count = v;
-      const es = GE.validateConfig(ngCfg);
-      check(es.some(t => t.includes('人数') && t.includes('36')),
-        '人数 ' + v + ' は検査に引っかかり文言に 36 を含む: ' + JSON.stringify(es));
+  }
+  // --- S4: 命名規則（同型連番・全編成一意・予算内 ≤4 字） ---
+  {
+    const cfg = {
+      human: { composition: { militia: 1, scout: 2 } },
+      zombie: { composition: { horde: 6 } },
+    };
+    checkEq(GE.validateConfig(cfg), [], 'S4: 検証を通る編成（26+18 点）');
+    const s = GE.createBattleState(cfg);
+    checkEq(s.members.map(m => m.name),
+      ['民兵1', '侦察兵1', '侦察兵2', '尸潮1', '尸潮2', '尸潮3', '尸潮4', '尸潮5', '尸潮6'],
+      'S4: 作成順は表序×型内番号');
+    checkEq(s.members.filter(m => m.typeId === 'horde').map(m => m.name),
+      ['尸潮1', '尸潮2', '尸潮3', '尸潮4', '尸潮5', '尸潮6'],
+      'S4: 同型は 1..n の連番');
+    checkEq([...new Set(s.members.map(m => m.name))].length, s.members.length,
+      'S4: 名前は全編成で一意');
+    check(s.members.every(m => m.name.length <= 4), 'S4: この編成の名前は 4 字以下');
+    check(s.members.some(m => m.name.length === 4), 'S4: 3 字兵種名+番号（侦察兵1）は 4 字に届く');
+    // 予算 100 での最大番号ケース: 尸潮×33（99 点）と 侦察兵×12（96 点）。
+    // V6（総人数 ≤36）により番号は常に 2 桁まで ⇒ 名前 ≤ 兵種名(≤3)+2 = 5 字。
+    // 5 字を超える表示は #16 の名字省略記号が受け持つ（CONTEXT「戦場」の定義どおり）
+    const cfgBig = { human: { composition: { scout: 12 } }, zombie: { composition: { horde: 33 } } };
+    const sBig = GE.createBattleState(cfgBig);
+    checkEq(GE.validateConfig(cfgBig), [], 'S4: 尸潮×33（99 点）/侦察兵×12（96 点）は予算 100 内で正当');
+    checkEq(sBig.members.filter(m => m.typeId === 'horde').map(m => m.name)[32], '尸潮33',
+      'S4: 尸潮×33 的最大编号名は「尸潮33」（4 字）');
+    checkEq(sBig.members.filter(m => m.typeId === 'scout').map(m => m.name)[11], '侦察兵12',
+      'S4: 侦察兵×12 的最大编号名は「侦察兵12」（5 字に届く境界例）');
+    check(sBig.members.every(m => m.name.length <= 5), 'S4: 予算 100 内の名前は 5 字以下（兵種名≤3+2 桁）');
+  }
+  // --- S2: 校验语义 V1–V8（消息原文・双陣営。T3 の承継） ---
+  {
+    const L = { human: '人类阵营', zombie: '丧尸阵营' };
+    const base = () => deepCopy(GE.DEFAULT_CONFIG);
+    for (const f of ['human', 'zombie']) {
+      // V1: 陣営の欠落 / 非オブジェクト（現行どおり）
+      const cfg = base(); delete cfg[f];
+      checkEq(GE.validateConfig(cfg), [L[f] + '的配置缺失'], 'S2 V1: ' + f + ' 設定欠落');
+      const cfgArr = base(); cfgArr[f] = 3;
+      checkEq(GE.validateConfig(cfgArr), [L[f] + '的配置缺失'], 'S2 V1: ' + f + ' 非オブジェクト');
+      // V2: composition の欠落 / 非オブジェクト（旧六字段形状の拒否を兼ねる）
+      const cfg2 = base(); delete cfg2[f].composition;
+      checkEq(GE.validateConfig(cfg2), [L[f] + '的编成配置缺失'], 'S2 V2: ' + f + ' composition 欠落');
+      const cfg3 = base(); cfg3[f].composition = 'militia:1';
+      checkEq(GE.validateConfig(cfg3), [L[f] + '的编成配置缺失'], 'S2 V2: ' + f + ' composition 非对象');
+      const cfgOld = base();
+      cfgOld[f] = { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 };
+      checkEq(GE.validateConfig(cfgOld), [L[f] + '的编成配置缺失'], 'S2 V2: 旧形状 config は拒否される');
     }
-    // placement: 欠落 / undefined / 'mixed' / 'split' は正当
+    // V3: 未知の兵種 key（他陣営の id も未知）
+    {
+      const cfg = base(); cfg.human.composition.rifleman = 1;
+      checkEq(GE.validateConfig(cfg), ['人类阵营的编成含有未知兵种：rifleman'], 'S2 V3: 未知兵種');
+      const cfgz = base(); cfgz.zombie.composition.militia = 1;
+      checkEq(GE.validateConfig(cfgz), ['丧尸阵营的编成含有未知兵种：militia'], 'S2 V3: 他陣営の id は未知兵種');
+    }
+    // V4: 数量が非整数 / 0..36 の範囲外（メッセージは型名で報告）
+    for (const [v, tname, id] of [[-1, '民兵', 'militia'], [1.5, '民兵', 'militia'], [37, '侦察兵', 'scout'], ['2', '守卫', 'guard']]) {
+      const cfgh = base(); cfgh.human.composition[id] = v;
+      checkEq(GE.validateConfig(cfgh), ['人类阵营的「' + tname + '」数量必须是 0～36 的整数'],
+        'S2 V4: 数量 ' + JSON.stringify(v) + ' は「' + tname + '」で拒否');
+    }
+    // V5: 総人数 0（全型 0 / composition が空オブジェクト）
+    {
+      const cfg = base();
+      for (const t of GE.UNIT_TYPES.human) cfg.human.composition[t.id] = 0;
+      checkEq(GE.validateConfig(cfg), ['人类阵营的编成至少要有一名角色'], 'S2 V5: 全 0 は拒否');
+      const cfgE = base(); cfgE.zombie.composition = {};
+      checkEq(GE.validateConfig(cfgE), ['丧尸阵营的编成至少要有一名角色'], 'S2 V5: 空 composition も総人数 0');
+    }
+    // V6 + V7: 総人数 > 36 は必ず予算超過も伴う（全量収集で両メッセージ）。
+    // 各型の数量は 0..36 内（V4 に掛からない）で合計だけ 37 を超える構成にする
+    {
+      const cfg = base(); cfg.zombie.composition = { horde: 36, walker: 1 };
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('丧尸阵营的编成总人数不能超过 36'), 'S2 V6: 総人数 37 > 36: ' + JSON.stringify(errs));
+      check(errs.includes('丧尸阵营的编成花费 118 点，超出配点预算 100 点'), 'S2 V7: 同時に予算超過も報告（既定 100）');
+    }
+    // V7 単独（総人数は 36 以内だが既定予算 100 を超過。恰 100 点は合法、108 点の原文）
+    {
+      const cfgOk = base(); cfgOk.human.composition = { militia: 10 };
+      checkEq(GE.validateConfig(cfgOk), [], 'S2 V7: 恰 100 点（民兵×10）は既定予算内で合法');
+      const cfg = base(); cfg.human.composition = { militia: 10, scout: 1 };
+      checkEq(GE.validateConfig(cfg), ['人类阵营的编成花费 108 点，超出配点预算 100 点'], 'S2 V7: 108 点の原文（既定 100）');
+    }
+    // V7（設定予算）: pointBudget で予算を上書きできる（両陣営同額で適用）
+    {
+      const cfg = base();
+      cfg.pointBudget = 30;
+      cfg.human.composition = { guard: 2, gunner: 1 };  // 人類 36 点・丧屍 trio 32 点
+      checkEq(GE.validateConfig(cfg),
+        ['人类阵营的编成花费 36 点，超出配点预算 30 点', '丧尸阵营的编成花费 32 点，超出配点预算 30 点'],
+        'S2 V7: 設定予算 30 は両陣営同額で適用される');
+      cfg.pointBudget = 36;
+      checkEq(GE.validateConfig(cfg), [], 'S2 V7: 設定予算 36 なら恰 36 点は合法');
+      cfg.pointBudget = 1;
+      cfg.human.composition = { militia: 1 };            // 10 点
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('人类阵营的编成花费 10 点，超出配点预算 1 点'), 'S2 V7: 予算 1 では民兵 1 体でも超過: ' + JSON.stringify(errs));
+      // 予算下限の境界: 1 は合法値（V9 は出ない。既定編成 32 点は V7 で超過報告）
+      const cfgB1 = base(); cfgB1.pointBudget = 1;
+      const errsB1 = GE.validateConfig(cfgB1);
+      check(errsB1.every(t => !t.includes('配点预算必须是')), 'S2 V9: 予算 1 自体は合法: ' + JSON.stringify(errsB1));
+      check(errsB1.every(t => t.includes('超出配点预算 1 点')), 'S2 V7: 予算 1 では既定編成も超過: ' + JSON.stringify(errsB1));
+    }
+    // V9: pointBudget 自体の検査（省略可。不正値は既定 100 で判定を続行）
+    for (const bad of [0, -5, 1.5, '50', 10000, null]) {
+      const cfg = base(); cfg.pointBudget = bad;
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('配点预算必须是 1～9999 的整数'),
+        'S2 V9: 予算 ' + JSON.stringify(bad) + ' は拒否: ' + JSON.stringify(errs));
+      check(errs.every(t => !t.includes('超出配点预算 100 点')),
+        'S2 V9: 不正予算でも既定 100 で編成判定は続行（既定編成 32 点は超過しない）');
+    }
+    {
+      // 不正予算 + 大編成: 判定は既定 100 基準
+      const cfg = base();
+      cfg.pointBudget = 'x';
+      cfg.human.composition = { militia: 20 };   // 200 点
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('配点预算必须是 1～9999 的整数'), 'S2 V9: 非数値予算の報告');
+      check(errs.includes('人类阵营的编成花费 200 点，超出配点预算 100 点'), 'S2 V9: 超過判定は既定 100 基準');
+    }
+    // 予算内の多様な編成は正当（人数は編成から内生）
+    {
+      const okA = { placement: 'mixed', human: { composition: { scout: 4 } }, zombie: { composition: { horde: 10 } } };
+      checkEq(GE.validateConfig(okA), [], 'S2: 4v10（32/30 点）は正当');
+      const okB = { human: { composition: { militia: 3 } }, zombie: { composition: { rotwalker: 1, shredder: 1, sprinter: 1 } } };
+      checkEq(GE.validateConfig(okB), [], 'S2: 欠 key（walker/horde）は 0 扱いで正当');
+    }
+    // 不正設定は開戦 API で例外（V5 経由）
+    {
+      const bad = deepCopy(GE.DEFAULT_CONFIG);
+      for (const t of GE.UNIT_TYPES.zombie) bad.zombie.composition[t.id] = 0;
+      let threw = false;
+      try { GE.runBattle(bad, GE.createRng(2)); } catch (e) { threw = true; }
+      check(threw, '不正設定（総人数 0）で runBattle は例外を投げる');
+    }
+    // placement: 欠落 / undefined / 'mixed' / 'split' は正当（原文どおり）
     for (const placement of [undefined, 'mixed', 'split']) {
       const okCfg = deepCopy(GE.DEFAULT_CONFIG);
       if (placement === undefined) delete okCfg.placement;
       else okCfg.placement = placement;
       checkEq(GE.validateConfig(okCfg), [], 'placement=' + String(placement) + ' は正当');
     }
-    // placement: null・空文字・非文字列・未知値は簡体中文エラー
+    // placement: null・空文字・非文字列・未知値は簡体中文エラー（V8 原文不変）
     for (const placement of [null, '', 'sideways', 0, true, {}]) {
       const ngCfg = deepCopy(GE.DEFAULT_CONFIG);
       ngCfg.placement = placement;
@@ -1090,8 +1347,7 @@ function main() {
 
   // --- 純関数性と同一シード再現性 ---
   {
-    const cfg = deepCopy(GE.DEFAULT_CONFIG);
-    cfg.human.count = 2; cfg.zombie.count = 2;
+    const cfg = compoUniform(2, 2);
     const cfgSnap = JSON.stringify(cfg);
     const st0 = GE.createBattleState(cfg);
     checkEq(JSON.stringify(cfg), cfgSnap, 'createBattleState は config を破壊しない');
@@ -1114,28 +1370,25 @@ function main() {
   }
 
   // =============================================== 1) 行動順（先攻決定）
-  // 1a. 同点なし: d100 降順に並ぶ
+  // 1a. 同点なし: d100 降順に並む
   {
-    const cfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 2, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
+    const cfg = compoUniform(2, 2);
     let s = GE.createBattleState(cfg);
-    checkEq(s.members.map(m => m.name), ['玩家1', '玩家2', '丧尸1', '丧尸2'],
+    checkEq(s.members.map(m => m.name), ['民兵1', '民兵2', '丧尸1', '丧尸2'],
       'members は human 側から順に生成');
     const rs = new RngScript();
-    // メンバー生成順に d100: 玩家1=30, 玩家2=90, 丧尸1=50, 丧尸2=70
+    // メンバー生成順に d100: 民兵1=30, 民兵2=90, 丧尸1=50, 丧尸2=70
     rs.pushDie(30, 100); rs.pushDie(90, 100); rs.pushDie(50, 100); rs.pushDie(70, 100);
     s = GE.rollInitiative(s, rs.rng);
     checkEq(rs.used, 4, '同点がなければ d100 は各 1 回ずつ');
-    checkEq(s.rolls['玩家1'], [30], 'rolls 履歴 玩家1');
-    checkEq(s.rolls['玩家2'], [90], 'rolls 履歴 玩家2');
+    checkEq(s.rolls['民兵1'], [30], 'rolls 履歴 民兵1');
+    checkEq(s.rolls['民兵2'], [90], 'rolls 履歴 民兵2');
     checkEq(s.rolls['丧尸1'], [50], 'rolls 履歴 丧尸1');
     checkEq(s.rolls['丧尸2'], [70], 'rolls 履歴 丧尸2');
-    checkEq(s.order, ['玩家2', '丧尸2', '丧尸1', '玩家1'], 'order は d100 降順');
+    checkEq(s.order, ['民兵2', '丧尸2', '丧尸1', '民兵1'], 'order は d100 降順');
     const orderLines = s.log.filter(e => e.type === 'order');
     checkEq(orderLines.length, 4, 'order 行は人数分');
-    check(orderLines[0].text.includes('玩家2（d100=90）'),
+    check(orderLines[0].text.includes('民兵2（d100=90）'),
       'order 行に d100 点数を含む: ' + orderLines[0].text);
     checkEq(s.log.filter(e => e.type === 'reroll').length, 0, '同点なしなら重投ログなし');
     checkEq(s.round, 1, 'rollInitiative 後 round==1');
@@ -1146,32 +1399,29 @@ function main() {
   //     （README 三.3 の公表セマンティクス: 重投点は組内だけで比較し、
   //      組と組外の前后は初投点で確定済み）
   {
-    const cfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
+    const cfg = compoUniform(2, 1);
     let s = GE.createBattleState(cfg);
     const rs = new RngScript();
-    // 初投: 玩家1=80, 玩家2=80, 丧尸1=85 → 玩家 2 人が同点
+    // 初投: 民兵1=80, 民兵2=80, 丧尸1=85 → 民兵 2 人が同点
     rs.pushDie(80, 100); rs.pushDie(80, 100); rs.pushDie(85, 100);
-    // 重投 1: 玩家1=10, 玩家2=10（まだ同点 → さらに重投）
+    // 重投 1: 民兵1=10, 民兵2=10（まだ同点 → さらに重投）
     rs.pushDie(10, 100); rs.pushDie(10, 100);
-    // 重投 2: 玩家1=5, 玩家2=95（これで組内決着）
+    // 重投 2: 民兵1=5, 民兵2=95（これで組内決着）
     rs.pushDie(5, 100); rs.pushDie(95, 100);
     s = GE.rollInitiative(s, rs.rng);
     checkEq(rs.used, 7, '重投は同点組だけ・決着まで（合計 7 ダイス）');
-    checkEq(s.rolls['玩家1'], [80, 10, 5], '玩家1 の d100 履歴');
-    checkEq(s.rolls['玩家2'], [80, 10, 95], '玩家2 の d100 履歴');
+    checkEq(s.rolls['民兵1'], [80, 10, 5], '民兵1 の d100 履歴');
+    checkEq(s.rolls['民兵2'], [80, 10, 95], '民兵2 の d100 履歴');
     checkEq(s.rolls['丧尸1'], [85], '同点でない丧尸1 は重投しない');
     // 組内 95>5、組と外の関係は初投 85>80 を維持
-    checkEq(s.order, ['丧尸1', '玩家2', '玩家1'],
+    checkEq(s.order, ['丧尸1', '民兵2', '民兵1'],
       '組内は重投点で、組の位置は初投点で確定');
     const rr = s.log.filter(e => e.type === 'reroll');
     checkEq(rr.length, 2, '重投ログは 2 バッチ（同点が続いたぶん繰り返す）');
-    check(rr.length > 0 && rr[0].text.includes('玩家1') && rr[0].text.includes('玩家2')
+    check(rr.length > 0 && rr[0].text.includes('民兵1') && rr[0].text.includes('民兵2')
       && rr[0].text.includes('同为 80 点'),
       '重投ログ 1 に組員と同点値: ' + (rr[0] ? rr[0].text : ''));
-    check(rr.length > 1 && rr[1].text.includes('玩家1') && rr[1].text.includes('玩家2'),
+    check(rr.length > 1 && rr[1].text.includes('民兵1') && rr[1].text.includes('民兵2'),
       '重投ログ 2 に組員: ' + (rr[1] ? rr[1].text : ''));
     check(rr.every(e => !e.text.includes('丧尸1')),
       '同点でない者は重投ログに現れない');
@@ -1179,20 +1429,17 @@ function main() {
 
   // 1c. 単発の同点: 1 回の重投で決着
   {
-    const cfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
+    const cfg = compoUniform(2, 1);
     let s = GE.createBattleState(cfg);
     const rs = new RngScript();
-    rs.pushDie(50, 100); rs.pushDie(50, 100); rs.pushDie(55, 100); // 初投（玩家 2 人同点）
+    rs.pushDie(50, 100); rs.pushDie(50, 100); rs.pushDie(55, 100); // 初投（民兵 2 人同点）
     rs.pushDie(60, 100); rs.pushDie(20, 100);                      // 重投 1 回で決着
     s = GE.rollInitiative(s, rs.rng);
     checkEq(rs.used, 5, '1 回の重投で決着（合計 5 ダイス）');
-    checkEq(s.rolls['玩家1'], [50, 60], '玩家1 の履歴');
-    checkEq(s.rolls['玩家2'], [50, 20], '玩家2 の履歴');
+    checkEq(s.rolls['民兵1'], [50, 60], '民兵1 の履歴');
+    checkEq(s.rolls['民兵2'], [50, 20], '民兵2 の履歴');
     checkEq(s.rolls['丧尸1'], [55], '丧尸1 は重投しない');
-    checkEq(s.order, ['丧尸1', '玩家1', '玩家2'],
+    checkEq(s.order, ['丧尸1', '民兵1', '民兵2'],
       '組内は重投点 60>20、組の位置は初投 55 を維持');
     checkEq(s.log.filter(e => e.type === 'reroll').length, 1, '重投ログは 1 バッチ');
     for (let i = 1; i < s.order.length; i++) {
@@ -1222,9 +1469,9 @@ function main() {
     check(acts[0].text.includes('攻击检定 d7=5 ≤ 攻击5'),
       'd7==攻撃 は失敗でない: ' + acts[0].text);
     check(!acts[0].text.includes('攻击失败'), '攻撃失敗の文言がない');
-    check(acts[0].text.includes('伤害 2') && acts[0].text.includes('玩家1 剩余 HP 10'),
+    check(acts[0].text.includes('伤害 2') && acts[0].text.includes('民兵1 剩余 HP 10'),
       '伤害と目標残り HP の記録: ' + acts[0].text);
-    checkEq(s2.members.find(m => m.name === '玩家1').hp, 10, '玩家1 は 12→10');
+    checkEq(s2.members.find(m => m.name === '民兵1').hp, 10, '民兵1 は 12→10');
   }
   // d7 == 攻撃値+1 → 攻撃失敗・行動終了（以降のダイスを消費しない）
   {
@@ -1242,7 +1489,7 @@ function main() {
     checkEq(acts[0].type, 'action-fail', 'd7==攻撃+1 → 攻撃失敗');
     check(acts[0].text.includes('攻击检定 d7=6 ＞ 攻击5，攻击失败'),
       '失敗ログの文言: ' + acts[0].text);
-    checkEq(s2.members.find(m => m.name === '玩家1').hp, 12, '失敗なら HP 減なし');
+    checkEq(s2.members.find(m => m.name === '民兵1').hp, 12, '失敗なら HP 減なし');
   }
   // 境界の外側: attack 0 は d7=1 でも必ず失敗 / attack 7 は d7=7 でも失敗しない
   {
@@ -1286,7 +1533,7 @@ function main() {
     checkEq(acts[0].type, 'action-dodge', 'd7==敏捷 → 回避成功');
     check(acts[0].text.includes('闪避检定 d7=4 ≤ 敏捷4，闪避成功'),
       '回避ログの文言: ' + acts[0].text);
-    checkEq(s2.members.find(m => m.name === '玩家1').hp, 12, '回避なら HP 減なし');
+    checkEq(s2.members.find(m => m.name === '民兵1').hp, 12, '回避なら HP 減なし');
   }
   // d7 == 敏捷+1 → 未回避で伤害を受ける
   {
@@ -1303,7 +1550,7 @@ function main() {
     checkEq(acts[0].type, 'action-hit', 'd7==敏捷+1 → 未回避で伤害');
     check(acts[0].text.includes('闪避检定 d7=5 ＞ 敏捷4，未闪避'),
       '未回避ログの文言: ' + acts[0].text);
-    checkEq(s2.members.find(m => m.name === '玩家1').hp, 11, '玩家1 は 12→11');
+    checkEq(s2.members.find(m => m.name === '民兵1').hp, 11, '民兵1 は 12→11');
   }
   // 敏捷 0 は d7=1 でも回避できない / 敏捷 7 は d7=7 でも必ず回避
   {
@@ -1337,15 +1584,15 @@ function main() {
   // =============================================== 4) 伤害は行動者の区間内
   {
     // 攻撃 7（必中）× 敏捷 0（必ず未回避）の 1v1 で全行動が命中。
-    // HP 9999 なので 1500 行動では誰も倒れない。
-    const cfg = {
+    // HP 9999 なので 1500 行動では誰も倒れない。#18 T4: 任意属性は直構で組む。
+    const stats4 = craftStats({
       human: { count: 1, hp: 9999, attack: 7, agility: 0, dmgMin: 1, dmgMax: 3 },
       zombie: { count: 1, hp: 9999, attack: 7, agility: 0, dmgMin: 2, dmgMax: 6 },
-    };
+    });
     const rng = GE.createRng(424242);
     // 隣接配置（(1,1) と (1,2)）に手で置き、1500 行動すべてを攻撃にする。
     // （未配置 state は戦闘ステップに入れないため、テスト側で pos を設定する）
-    let s = GE.createBattleState(cfg);
+    let s = craftInitial(stats4);
     s.members[0].pos = { row: 1, col: 1 };
     s.members[1].pos = { row: 1, col: 2 };
     s = GE.rollInitiative(s, rng);
@@ -1388,47 +1635,47 @@ function main() {
   // =============================================== 5) 倒地とスキップ
   {
     // 玩家は攻撃 0（絶対命中しない）・HP 2。丧尸は攻撃 7・固定伤害 3。
-    // 順序を 玩家1(90) → 玩家2(80) → 丧尸1(10) に固定。
+    // 順序を 民兵1(90) → 民兵2(80) → 丧尸1(10) に固定。
     const { state: s0 } = makeState({
       humanRolls: [90, 80], zombieRolls: [10],
       human: { count: 2, hp: 2, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
       zombie: { count: 1, hp: 100, attack: 7, agility: 9, dmgMin: 3, dmgMax: 3 },
     });
     const order0 = JSON.stringify(s0.order);
-    checkEq(s0.order, ['玩家1', '玩家2', '丧尸1'], '順序固定');
+    checkEq(s0.order, ['民兵1', '民兵2', '丧尸1'], '順序固定');
     let s = s0;
-    // t1: 玩家1 → 丧尸1 に攻撃するが attack 0 で失敗
+    // t1: 民兵1 → 丧尸1 に攻撃するが attack 0 で失敗
     let rs = new RngScript(); rs.pushInt(0, 0, 0); rs.pushDie(1, 7);
     let lenBefore = s.log.length;
     s = GE.takeTurn(s, rs.rng);
-    checkEq(rs.used, 2, 't1 玩家1 の攻撃失敗（乱数 2 回）');
+    checkEq(rs.used, 2, 't1 民兵1 の攻撃失敗（乱数 2 回）');
     checkEq(s.turnIndex, 1, 't1 後 turnIndex');
     checkEq(s.members.find(m => m.name === '丧尸1').hp, 100, 't1 で HP 変化なし');
-    // t2: 玩家2 も失敗
+    // t2: 民兵2 も失敗
     rs = new RngScript(); rs.pushInt(0, 0, 0); rs.pushDie(1, 7);
     s = GE.takeTurn(s, rs.rng);
     checkEq(s.turnIndex, 2, 't2 後 turnIndex');
-    // t3: 丧尸1 が 玩家1 を選んで命中・固定伤害 3 → HP2 から 0（超過丸め）→ 倒地
+    // t3: 丧尸1 が 民兵1 を選んで命中・固定伤害 3 → HP2 から 0（超過丸め）→ 倒地
     rs = new RngScript();
-    rs.pushInt(0, 0, 1);   // 目標候補 2 体のうち 0 番（玩家1）
+    rs.pushInt(0, 0, 1);   // 目標候補 2 体のうち 0 番（民兵1）
     rs.pushDie(7, 7);      // 攻撃命中
-    rs.pushDie(1, 7);      // 玩家1 敏捷 0 → 未回避
+    rs.pushDie(1, 7);      // 民兵1 敏捷 0 → 未回避
     rs.pushInt(3, 3, 3);   // 伤害 3
     lenBefore = s.log.length;
     s = GE.takeTurn(s, rs.rng);
     checkEq(rs.used, 4, 't3 命中経路の乱数 4 回');
-    const p1 = s.members.find(m => m.name === '玩家1');
+    const p1 = s.members.find(m => m.name === '民兵1');
     checkEq(p1.hp, 0, '超過伤害でも HP は 0 に丸められる（負にならない）');
     checkEq(p1.downed, true, 'hp<=0 で倒地');
     const t3Acts = actionEntriesBetween(s, lenBefore);
     checkEq(t3Acts.length, 1, 't3 は 1 行動ログ');
-    check(t3Acts[0].text.includes('玩家1 剩余 HP 0，倒地！'),
+    check(t3Acts[0].text.includes('民兵1 剩余 HP 0，倒地！'),
       '倒地ログ: ' + t3Acts[0].text);
-    checkEq(s.finished, false, '玩家2 が生存 → 戦闘は終了しない');
+    checkEq(s.finished, false, '民兵2 が生存 → 戦闘は終了しない');
     checkEq(s.turnIndex, 0, 't3 後は順序の先頭へ戻る');
     check(s.log.slice(lenBefore).some(e => e.type === 'round' && e.text.includes('第 2 轮')),
       'ラウンド送りログがある');
-    // t4: 番が来た 玩家1 は倒地 → 何もせずスキップ（ログ増えず・乱数消費 0）
+    // t4: 番が来た 民兵1 は倒地 → 何もせずスキップ（ログ増えず・乱数消費 0）
     rs = new RngScript();
     const logLen = s.log.length;
     const stepsBefore = s.steps;
@@ -1439,32 +1686,29 @@ function main() {
     checkEq(s.steps, stepsBefore + 1, 'steps カウンタは進む');
     checkEq(s.turnIndex, idxBefore + 1, 'turnIndex だけ進む');
     checkEq(JSON.stringify(s.order), order0, 'order は戦闘中不変');
-    // t5: 玩家2 も失敗
+    // t5: 民兵2 も失敗
     rs = new RngScript(); rs.pushInt(0, 0, 0); rs.pushDie(1, 7);
     s = GE.takeTurn(s, rs.rng);
-    // t6: 丧尸1 の目標候補は 玩家2 だけ（倒地した 玩家1 は選ばれない）→ 玩家2 倒地 → 丧尸勝利
+    // t6: 丧尸1 の目標候補は 民兵2 だけ（倒地した 民兵1 は選ばれない）→ 民兵2 倒地 → 丧尸勝利
     rs = new RngScript();
     rs.pushInt(0, 0, 0); rs.pushDie(7, 7); rs.pushDie(1, 7); rs.pushInt(3, 3, 3);
     s = GE.takeTurn(s, rs.rng);
-    const p2 = s.members.find(m => m.name === '玩家2');
-    checkEq(p2.downed, true, 't6 で 玩家2 倒地');
+    const p2 = s.members.find(m => m.name === '民兵2');
+    checkEq(p2.downed, true, 't6 で 民兵2 倒地');
     checkEq(s.finished, true, 'human 全滅 → 戦闘終了');
     checkEq(s.winner, 'zombie', '勝者は zombie');
     checkEq(s.survivors, [{ name: '丧尸1', hp: 100, maxHp: 100 }], '勝者生存者の表示');
     checkEq(s.turnIndex, 2, '決着ターンでは turnIndex を進めない');
     const hitTexts = s.log.filter(e => e.type === 'action-hit').map(e => e.text);
     checkEq(hitTexts.length, 2, '命中ログは 2 件');
-    check(hitTexts[1].includes('丧尸1 → 玩家2：'),
-      '倒地した 玩家1 は再度目標に選ばれない: ' + hitTexts[1]);
+    check(hitTexts[1].includes('丧尸1 → 民兵2：'),
+      '倒地した 民兵1 は再度目標に選ばれない: ' + hitTexts[1]);
   }
   console.log('[progress] downed/skip done, failures=' + failures.length);
 
   // =============================================== 6) 終局と勝者表示
   {
-    const cfg = {
-      human: { count: 3, hp: 10, attack: 4, agility: 3, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 2, hp: 8, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
+    const cfg = compoUniform(3, 2);
     const fin = GE.runBattle(cfg, GE.createRng(7));
     checkEq(fin.finished, true, 'runBattle は必ず終局する');
     check(fin.winner === 'human' || fin.winner === 'zombie', '勝者: ' + fin.winner);
@@ -1489,13 +1733,14 @@ function main() {
     const saved = GE.MAX_STEPS;
     try {
       GE.MAX_STEPS = 5;
-      const cfg = {
-        human: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
-        zombie: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
-      };
-      const fin = GE.runBattle(cfg, GE.createRng(1));
-      checkEq(fin.finished, true, 'ステップ上限で強制終了');
-      checkEq(fin.winner, 'draw', '上限到達は draw');
+      // 攻撃 0 同士（双方永遠に命中しない）。#18 T4: 直構で組み、同一 rng を
+      // 共有する takeTurn 連鎖で完走する（旧 runBattle 相当の経路保証）
+      const rng6 = GE.createRng(1);
+      const st6 = craftInitial(craftStats({ human: { attack: 0 }, zombie: { attack: 0 } }));
+      st6.members[0].pos = { row: 1, col: 1 };
+      st6.members[1].pos = { row: 1, col: 2 };
+      let fin = GE.rollInitiative(st6, rng6);
+      while (!fin.finished) fin = GE.takeTurn(fin, rng6);
       checkEq(fin.survivors, [], 'draw のとき survivors は空');
       check(fin.steps > 5, 'steps が上限を超えた: ' + fin.steps);
       check(fin.log.some(e => e.type === 'victory' && e.text.includes('平局')),
@@ -1510,46 +1755,43 @@ function main() {
   console.log('[progress] battle end done, failures=' + failures.length);
 
   // =============================================== 7) ストレス試験 223 戦
+  // #18 T4: runBattle 経路の構成は予算内の正規 composition で作る
+  //（任意属性シナリオは直構専用になったため、ストレスは異構成で網羅する）
   const stressCases = [];
-  // 1v1 既定設定 × 60 シード
+  // 1v1 均衡型（旧既定属性と同一）× 60 シード
   for (let i = 0; i < 60; i++) {
-    stressCases.push({ label: '1v1-default#' + i, seed: 1000 + i, cfg: deepCopy(GE.DEFAULT_CONFIG) });
+    stressCases.push({ label: '1v1-default#' + i, seed: 1000 + i, cfg: compoUniform(1, 1) });
   }
-  // 非対称・変則スタット × 160 シード（人数 1..4 ずつ、攻撃 2..6 で必ず終局する）
+  // 兵種混合の異構成 × 160 シード（均衡/肉盾/火力/遊撃/炮灰を満遍なく。
+  // 予算 32 点内で人数 1..10 の多様な対戦を作る）
+  const H_PATTERNS = [
+    { militia: 1 }, { militia: 2 }, { militia: 3 },
+    { guard: 1 }, { guard: 2 }, { scout: 2 }, { scout: 3 }, { scout: 4 },
+    { militia: 1, scout: 2 }, { guard: 1, scout: 2 }, { guard: 1, gunner: 1 },
+    { militia: 2, scout: 1 }, { gunner: 2 }, { gunner: 1, scout: 2 }, { militia: 1, gunner: 1, scout: 1 },
+    { guard: 2, scout: 1 },
+  ];
+  const Z_PATTERNS = [
+    { walker: 1 }, { walker: 2 }, { walker: 3 },
+    { rotwalker: 1 }, { rotwalker: 2 }, { sprinter: 2 }, { sprinter: 3 }, { sprinter: 4 },
+    { walker: 1, horde: 3 }, { rotwalker: 1, horde: 3 }, { rotwalker: 1, shredder: 1 },
+    { walker: 2, horde: 2 }, { shredder: 2 }, { shredder: 1, horde: 3 }, { walker: 1, shredder: 1, sprinter: 1 },
+    { horde: 10 },
+  ];
   for (let i = 0; i < 160; i++) {
-    const h = {
-      count: 1 + (i % 4),
-      hp: 8 + (i % 6) * 2,
-      attack: 2 + (i % 5),
-      agility: i % 6,
-      dmgMin: 1,
-      dmgMax: 2 + (i % 4),
-    };
-    const z = {
-      count: 1 + ((i * 3 + 1) % 4),
-      hp: 6 + ((i * 2) % 5) * 2,
-      attack: 2 + ((i + 3) % 5),
-      agility: (i * 2 + 1) % 6,
-      dmgMin: 1 + (i % 2),
-      dmgMax: 0,
-    };
-    z.dmgMax = z.dmgMin + (i % 3);
-    stressCases.push({ label: 'mixed#' + i, seed: 2000 + i, cfg: { human: h, zombie: z } });
+    stressCases.push({
+      label: 'mixed#' + i, seed: 2000 + i,
+      cfg: {
+        human: { composition: H_PATTERNS[i % H_PATTERNS.length] },
+        zombie: { composition: Z_PATTERNS[(i * 7 + 3) % Z_PATTERNS.length] },
+      },
+    });
   }
-  // 大人数の非対称 3 戦
+  // 人数差のある非対称 3 戦（予算内。尸潮×10 を含む）
   const extraCfgs = [
-    {
-      human: { count: 5, hp: 10, attack: 3, agility: 2, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 3, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    },
-    {
-      human: { count: 3, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 5, hp: 9, attack: 3, agility: 3, dmgMin: 1, dmgMax: 4 },
-    },
-    {
-      human: { count: 5, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 5, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    },
+    { human: { composition: { scout: 4 } }, zombie: { composition: { walker: 2, horde: 3 } } },
+    { human: { composition: { militia: 2, scout: 1 } }, zombie: { composition: { horde: 10 } } },
+    { human: { composition: { guard: 2, scout: 1 } }, zombie: { composition: { walker: 1, horde: 6 } } },
   ];
   extraCfgs.forEach((cfg, i) => {
     stressCases.push({ label: 'extra#' + i, seed: 3000 + i, cfg });
@@ -1623,7 +1865,7 @@ function main() {
     checkEq(r2, r1, 'getResult の内容は安定');
     // 不正設定は例外（runBattle と同じ検査を通る）
     const badCfg = deepCopy(GE.DEFAULT_CONFIG);
-    badCfg.zombie.count = 0;
+    for (const t of GE.UNIT_TYPES.zombie) badCfg.zombie.composition[t.id] = 0;
     let threw = false;
     try { GE.startBattle(badCfg, GE.createRng(1)); } catch (e) { threw = true; }
     check(threw, '不正設定で startBattle は例外を投げる');
@@ -1631,26 +1873,31 @@ function main() {
 
   // 8c. スクリプト済み乱数によるステップ境界: 倒地スキップの event と終局後の安全再ステップ
   {
-    // 順序を 玩家1(90) → 玩家2(80) → 丧尸1(10) に固定。玩家は攻撃 0・HP 2、
-    // 丧尸は攻撃 7・固定伤害 3（既存 5) 節と同じ局面をステップ経路で再現する）
-    const cfg = {
+    // 前段: 本物の開戦経路で「初期配置（3 人 × 1 抽選）→ 先攻 d100」の消費順を
+    // 検証する（均衡型 2v1。民兵1=(1,2) 民兵2=(2,3) 丧尸1=(2,2) に固定。
+    // 全員が 丧尸1 と 4 隣接する配置）
+    {
+      const rs0 = new RngScript();
+      const draws8c = placementDraws(defaultPos(2, 1));
+      for (const d of draws8c) rs0.pushInt(d.v, 0, d.k - 1);
+      rs0.pushDie(90, 100); rs0.pushDie(80, 100); rs0.pushDie(10, 100);
+      const sa = GE.startBattle(compoUniform(2, 1), rs0.rng);
+      checkEq(rs0.used, 6, '8c: startBattle は初期配置 3 回＋先攻 d100 3 回だけ消費');
+      checkEq(sa.members.find(m => m.name === '民兵1').pos, { row: 1, col: 2 }, '8c: 民兵1 の初期配置');
+      checkEq(sa.members.find(m => m.name === '民兵2').pos, { row: 2, col: 3 }, '8c: 民兵2 の初期配置');
+      checkEq(sa.members.find(m => m.name === '丧尸1').pos, { row: 2, col: 2 }, '8c: 丧尸1 の初期配置');
+      checkEq(sa.order, ['民兵1', '民兵2', '丧尸1'], '8c: 順序固定');
+    }
+    // 境界シナリオ本体: 順序を 民兵1(90) → 民兵2(80) → 丧尸1(10) に固定。
+    // 民兵は攻撃 0・HP 2、丧尸は攻撃 7・固定伤害 3（既存 5) 節と同じ局面を
+    // ステップ経路で再現する）。#18 T4: 任意属性は直構で組む（pos 直置き）
+    let s = craftPlaced(craftStats({
       human: { count: 2, hp: 2, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
       zombie: { count: 1, hp: 100, attack: 7, agility: 9, dmgMin: 3, dmgMax: 3 },
-    };
-    const rs0 = new RngScript();
-    // 初期配置（3 人 × 1 抽選）を先に固定: 玩家1=(1,2) 玩家2=(2,3) 丧尸1=(2,2)。
-    // 全員が 丧尸1 と 4 隣接し、以降の攻撃境界スクリプトがそのまま成立する
-    const draws8c = placementDraws(defaultPos(2, 1));
-    for (const d of draws8c) rs0.pushInt(d.v, 0, d.k - 1);
-    rs0.pushDie(90, 100); rs0.pushDie(80, 100); rs0.pushDie(10, 100);
-    let s = GE.startBattle(cfg, rs0.rng);
-    checkEq(rs0.used, 6, '8c: startBattle は初期配置 3 回＋先攻 d100 3 回だけ消費');
-    checkEq(s.members.find(m => m.name === '玩家1').pos, { row: 1, col: 2 }, '8c: 玩家1 の初期配置');
-    checkEq(s.members.find(m => m.name === '玩家2').pos, { row: 2, col: 3 }, '8c: 玩家2 の初期配置');
-    checkEq(s.members.find(m => m.name === '丧尸1').pos, { row: 2, col: 2 }, '8c: 丧尸1 の初期配置');
-    checkEq(s.order, ['玩家1', '玩家2', '丧尸1'], '8c: 順序固定');
+    }), defaultPos(2, 1), [90, 80, 10]);
+    checkEq(s.order, ['民兵1', '民兵2', '丧尸1'], '8c: 順序固定（直構）');
 
-    // step1: 玩家1 の攻撃失敗
+    // step1: 民兵1 の攻撃失敗
     let snap = JSON.stringify(s);
     let rs = new RngScript();
     rs.pushInt(0, 0, 0);   // 目標は 候補 1 体の 丧尸1
@@ -1661,7 +1908,7 @@ function main() {
     checkEq(JSON.stringify(s), snap, '8c step1: 入力 state は無傷');
     check(res.state !== s, '8c step1: 新しい state を返す');
     checkEq(res.event.kind, 'fail', '8c step1: event は fail');
-    checkEq(res.event.actor, '玩家1', '8c step1: actor');
+    checkEq(res.event.actor, '民兵1', '8c step1: actor');
     checkEq(res.event.target, '丧尸1', '8c step1: target');
     checkEq(res.event.atkRoll, 1, '8c step1: atkRoll');
     checkEq(res.event.attack, 0, '8c step1: attack');
@@ -1669,19 +1916,19 @@ function main() {
     checkEq(res.state.log.length, lenBefore + 1, '8c step1: ログ 1 行追記');
     s = res.state;
 
-    // step2: 玩家2 も失敗
+    // step2: 民兵2 も失敗
     rs = new RngScript(); rs.pushInt(0, 0, 0); rs.pushDie(1, 7);
     res = GE.stepBattle(s, rs.rng);
     checkEq(res.event.kind, 'fail', '8c step2: fail');
     checkEq(res.state.turnIndex, 2, '8c step2: turnIndex');
     s = res.state;
 
-    // step3: 丧尸1 が 玩家1 に命中・固定伤害 3 → 倒地（戦闘は続行）
+    // step3: 丧尸1 が 民兵1 に命中・固定伤害 3 → 倒地（戦闘は続行）
     snap = JSON.stringify(s);
     rs = new RngScript();
-    rs.pushInt(0, 0, 1);   // 目標候補 2 体のうち 0 番（玩家1）
+    rs.pushInt(0, 0, 1);   // 目標候補 2 体のうち 0 番（民兵1）
     rs.pushDie(7, 7);      // 攻撃命中
-    rs.pushDie(1, 7);      // 玩家1 敏捷 0 → 未回避
+    rs.pushDie(1, 7);      // 民兵1 敏捷 0 → 未回避
     rs.pushInt(3, 3, 3);   // 伤害 3
     lenBefore = s.log.length;
     res = GE.stepBattle(s, rs.rng);
@@ -1689,12 +1936,12 @@ function main() {
     checkEq(JSON.stringify(s), snap, '8c step3: 入力 state は無傷');
     checkEq(res.event.kind, 'hit', '8c step3: event は hit');
     checkEq(res.event.actor, '丧尸1', '8c step3: actor');
-    checkEq(res.event.target, '玩家1', '8c step3: target');
+    checkEq(res.event.target, '民兵1', '8c step3: target');
     checkEq(res.event.damage, 3, '8c step3: damage');
     checkEq(res.event.hpBefore, 2, '8c step3: hpBefore');
     checkEq(res.event.hpAfter, 0, '8c step3: hpAfter');
     checkEq(res.event.downed, true, '8c step3: downed');
-    checkEq(res.event.finished, undefined, '8c step3: 玩家2 が生存なので非終局');
+    checkEq(res.event.finished, undefined, '8c step3: 民兵2 が生存なので非終局');
     checkEq(res.state.log.length, lenBefore + 2, '8c step3: hit 行 + 折り返し round 行');
     check(res.state.log[res.state.log.length - 1].type === 'round'
       && res.state.log[res.state.log.length - 1].text.includes('第 2 轮'),
@@ -1702,7 +1949,7 @@ function main() {
     checkEq(res.state.round, 2, '8c step3: round は 2 へ');
     s = res.state;
 
-    // step4: 倒地した 玩家1 の番 → event skip、乱数 0、ログ無追記
+    // step4: 倒地した 民兵1 の番 → event skip、乱数 0、ログ無追記
     snap = JSON.stringify(s);
     rs = new RngScript(); // 1 回でも乱数を使ったら例外で落ちる
     lenBefore = s.log.length;
@@ -1710,19 +1957,19 @@ function main() {
     checkEq(rs.used, 0, '8c step4: 倒地者のスキップは乱数を消費しない');
     checkEq(JSON.stringify(s), snap, '8c step4: 入力 state は無傷');
     checkEq(res.event.kind, 'skip', '8c step4: event は skip');
-    checkEq(res.event.actor, '玩家1', '8c step4: actor は倒地者');
+    checkEq(res.event.actor, '民兵1', '8c step4: actor は倒地者');
     checkEq(res.state.log.length, lenBefore, '8c step4: ログ無追記');
     checkEq(res.state.turnIndex, 1, '8c step4: turnIndex だけ進む');
     checkEq(res.state.steps, s.steps + 1, '8c step4: steps は進む');
     s = res.state;
 
-    // step5: 玩家2 失敗
+    // step5: 民兵2 失敗
     rs = new RngScript(); rs.pushInt(0, 0, 0); rs.pushDie(1, 7);
     res = GE.stepBattle(s, rs.rng);
     checkEq(res.event.kind, 'fail', '8c step5: fail');
     s = res.state;
 
-    // step6: 丧尸1 が 玩家2 を倒す → 終局ステップは hit + finished + winner
+    // step6: 丧尸1 が 民兵2 を倒す → 終局ステップは hit + finished + winner
     snap = JSON.stringify(s);
     rs = new RngScript();
     rs.pushInt(0, 0, 0); rs.pushDie(7, 7); rs.pushDie(1, 7); rs.pushInt(3, 3, 3);
@@ -1731,7 +1978,7 @@ function main() {
     checkEq(rs.used, 4, '8c step6: 乱数 4 回');
     checkEq(JSON.stringify(s), snap, '8c step6: 入力 state は無傷');
     checkEq(res.event.kind, 'hit', '8c step6: event は hit');
-    checkEq(res.event.target, '玩家2', '8c step6: target（倒地した 玩家1 は選ばれない）');
+    checkEq(res.event.target, '民兵2', '8c step6: target（倒地した 民兵1 は選ばれない）');
     checkEq(res.event.downed, true, '8c step6: downed');
     checkEq(res.event.finished, true, '8c step6: 終局ステップ');
     checkEq(res.event.winner, 'zombie', '8c step6: winner');
@@ -1762,12 +2009,13 @@ function main() {
     const saved = GE.MAX_STEPS;
     try {
       GE.MAX_STEPS = 5;
-      const cfg = {
-        human: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
-        zombie: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
-      };
       const rng = GE.createRng(1);
-      let s = GE.startBattle(cfg, rng);
+      let s = GE.rollInitiative((() => {
+        const st = craftInitial(craftStats({ human: { attack: 0 }, zombie: { attack: 0 } }));
+        st.members[0].pos = { row: 1, col: 1 };
+        st.members[1].pos = { row: 1, col: 2 };
+        return st;
+      })(), rng);
       let guard = 0;
       let lastEv = null;
       while (!s.finished && guard < 100) {
@@ -1783,8 +2031,15 @@ function main() {
       checkEq(s.survivors, [], '8d: draw のとき survivors は空');
       check(s.log.some(e => e.type === 'victory' && e.text.includes('平局')),
         '8d: 平局の victory 行');
-      checkEq(JSON.stringify(s), JSON.stringify(GE.runBattle(cfg, GE.createRng(1))),
-        '8d: ステップ経路の draw 終局も整場一括と完全一致');
+      // 整場一括相当は同一 rng・同一開始 state の takeTurn 連鎖で検証する
+      const rngT = GE.createRng(1);
+      const stT = craftInitial(craftStats({ human: { attack: 0 }, zombie: { attack: 0 } }));
+      stT.members[0].pos = { row: 1, col: 1 };
+      stT.members[1].pos = { row: 1, col: 2 };
+      let t8 = GE.rollInitiative(stT, rngT);
+      while (!t8.finished) t8 = GE.takeTurn(t8, rngT);
+      checkEq(JSON.stringify(s), JSON.stringify(t8),
+        '8d: ステップ経路の draw 終局も takeTurn 連鎖と完全一致');
     } finally {
       GE.MAX_STEPS = saved;
     }
@@ -1869,34 +2124,14 @@ function main() {
   // 8g. 代表構成（1v1・人数不对称・長期戦）で毎歩の詳細照合 + 毎歩 takeTurn 一致
   {
     const dualCases = [
-      { label: 'dual-1v1-a', seed: 4242, cfg: deepCopy(GE.DEFAULT_CONFIG) },
-      { label: 'dual-1v1-b', seed: 4243, cfg: deepCopy(GE.DEFAULT_CONFIG) },
-      {
-        label: 'dual-1v3', seed: 4244,
-        cfg: { human: { count: 1, hp: 14, attack: 4, agility: 3, dmgMin: 1, dmgMax: 3 },
-               zombie: { count: 3, hp: 8, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 } },
-      },
-      {
-        label: 'dual-4v1', seed: 4245,
-        cfg: { human: { count: 4, hp: 10, attack: 4, agility: 3, dmgMin: 1, dmgMax: 3 },
-               zombie: { count: 1, hp: 20, attack: 6, agility: 4, dmgMin: 2, dmgMax: 5 } },
-      },
-      {
-        label: 'dual-3v5', seed: 4246,
-        cfg: { human: { count: 3, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-               zombie: { count: 5, hp: 9, attack: 3, agility: 2, dmgMin: 1, dmgMax: 4 } },
-      },
-      {
-        label: 'dual-5v5', seed: 4247,
-        cfg: { human: { count: 5, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-               zombie: { count: 5, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 } },
-      },
-      {
-        // 攻撃 7 / 敏捷 0 で全行動命中の長期戦（毎歩比較の負荷も兼ねる）
-        label: 'dual-long', seed: 4248,
-        cfg: { human: { count: 1, hp: 260, attack: 7, agility: 0, dmgMin: 1, dmgMax: 3 },
-               zombie: { count: 1, hp: 260, attack: 7, agility: 0, dmgMin: 2, dmgMax: 6 } },
-      },
+      { label: 'dual-1v1-a', seed: 4242, cfg: compoUniform(1, 1) },
+      { label: 'dual-1v1-b', seed: 4243, cfg: compoUniform(1, 1) },
+      { label: 'dual-1v3', seed: 4244, cfg: { human: { composition: { scout: 1 } }, zombie: { composition: { horde: 3 } } } },
+      { label: 'dual-4v1', seed: 4245, cfg: { human: { composition: { scout: 4 } }, zombie: { composition: { rotwalker: 1 } } } },
+      { label: 'dual-3v6', seed: 4246, cfg: { human: { composition: { militia: 3 } }, zombie: { composition: { horde: 5, sprinter: 1 } } } },
+      { label: 'dual-4v6', seed: 4247, cfg: { human: { composition: { scout: 4 } }, zombie: { composition: { horde: 5, walker: 1 } } } },
+      // 長期戦（毎歩比較の負荷も兼ねる）: 尸潮×10 の物量対 特色三人組
+      { label: 'dual-long', seed: 4248, cfg: { human: { composition: { guard: 1, gunner: 1, scout: 1 } }, zombie: { composition: { horde: 10 } } } },
     ];
     for (const c of dualCases) {
       const ref = GE.runBattle(deepCopy(c.cfg), GE.createRng(c.seed));
@@ -1925,39 +2160,61 @@ function main() {
       console.log('[progress] dual ' + c.label + ': steps=' + steps + ' failures=' + failures.length);
     }
   }
+
+  // =============================================== 8h) S5: 異構成の同一シード一致（#18 仕様）
+  {
+    const s5Cases = [
+      { label: 'S5-trio', seed: 5151, cfg: deepCopy(GE.DEFAULT_CONFIG) },
+      { label: 'S5-horde10', seed: 5152, cfg: { human: { composition: { guard: 2, scout: 1 } }, zombie: { composition: { horde: 10 } } } },
+    ];
+    for (const c of s5Cases) {
+      checkEq(GE.validateConfig(c.cfg), [], c.label + ': 編成は正当');
+      const ref = GE.runBattle(deepCopy(c.cfg), GE.createRng(c.seed));
+      const rngS5 = GE.createRng(c.seed);
+      let s5 = GE.startBattle(deepCopy(c.cfg), rngS5);
+      let guard5 = 0;
+      while (!s5.finished && guard5 < 500000) {
+        const r = GE.stepBattle(s5, rngS5);
+        s5 = r.state;
+        guard5++;
+      }
+      check(guard5 < 500000, c.label + ': 逐次実行が終局する');
+      checkEq(JSON.stringify(s5), JSON.stringify(ref),
+        c.label + ': 異構成でも整場一括 ≡ 逐次（終局 state・ログが完全一致）');
+      verifyStateAndLog(s5, c.cfg, c.label);
+    }
+  }
+
   console.log('[progress] step API done, failures=' + failures.length);
 
   // =============================================== 10) 初期配置（9×9 グリッド）
-  // 10a. RngScript で抽選列を固定し、「作成順（玩家1..n → 丧尸1..n）に
+  // 10a. RngScript で抽選列を固定し、「作成順（民兵1..n → 丧尸1..n）に
   //      1 人ずつ randInt(0, k-1) で残り空きマス（行列表順）から抽選」
   //      というアルゴリズムそのものと、配置→先攻の消費順を検証する
   {
-    const cfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
+    const cfg = compoUniform(2, 1);
     const rs = new RngScript();
-    // 玩家1: 残り 81 中 40 番（5,5）→ 玩家2: 残り 80 中 0 番（1,1）→
+    // 民兵1: 残り 81 中 40 番（5,5）→ 民兵2: 残り 80 中 0 番（1,1）→
     // 丧尸1: 残り 79 中 78 番（末尾 = (9,9)）
     rs.pushInt(40, 0, 80); rs.pushInt(0, 0, 79); rs.pushInt(78, 0, 78);
     // その後に先攻 d100（全員異点なので重投なし）
     rs.pushDie(90, 100); rs.pushDie(80, 100); rs.pushDie(70, 100);
     const s = GE.startBattle(cfg, rs.rng);
     checkEq(rs.used, 6, '10a: 初期配置は 1 人 1 抽選・その後に先攻 d100（計 6 回）');
-    checkEq(s.members.find(m => m.name === '玩家1').pos, { row: 5, col: 5 },
-      '10a: 玩家1 は 81 マス中 40 番（5,5）に落ちる');
-    checkEq(s.members.find(m => m.name === '玩家2').pos, { row: 1, col: 1 },
-      '10a: 玩家2 は残り空きマスの先頭（1,1）に落ちる');
+    checkEq(s.members.find(m => m.name === '民兵1').pos, { row: 5, col: 5 },
+      '10a: 民兵1 は 81 マス中 40 番（5,5）に落ちる');
+    checkEq(s.members.find(m => m.name === '民兵2').pos, { row: 1, col: 1 },
+      '10a: 民兵2 は残り空きマスの先頭（1,1）に落ちる');
     checkEq(s.members.find(m => m.name === '丧尸1').pos, { row: 9, col: 9 },
       '10a: 丧尸1 は残り空きマスの末尾（9,9）に落ちる');
-    checkEq(s.log.filter(e => e.type === 'order')[0].text, '1. 玩家1（d100=90）（5,5）',
+    checkEq(s.log.filter(e => e.type === 'order')[0].text, '1. 民兵1（d100=90）（5,5）',
       '10a: order 行は行尾に初期座標「（5,5）」を付す');
   }
   // 10b. 同一シード再現 + 複数 seed で落位の重複なし・界内
   {
     const cfg = {
-      human: { count: 5, hp: 10, attack: 3, agility: 2, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 4, hp: 8, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      human: { composition: { scout: 4 } },                // 32 点・4 人
+      zombie: { composition: { walker: 2, horde: 3 } },    // 29 点・5 人
     };
     for (const seed of [11, 12, 13, 14]) {
       const a = GE.startBattle(deepCopy(cfg), GE.createRng(seed));
@@ -1973,8 +2230,8 @@ function main() {
   {
     const cfg = {
       placement: 'split',
-      human: { count: 6, hp: 10, attack: 3, agility: 2, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 6, hp: 8, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      human: { composition: { scout: 4 } },      // 32 点・4 人
+      zombie: { composition: { horde: 6 } },     // 18 点・6 人
     };
     for (const seed of [31, 32]) {
       const s = GE.startBattle(deepCopy(cfg), GE.createRng(seed));
@@ -2000,7 +2257,7 @@ function main() {
       pos: [{ row: 1, col: 1 }, { row: 1, col: 9 }], // 隣接しない 1v1 → 先手は移動
       humanRolls: [90], zombieRolls: [40],
     });
-    checkEq(s0.members[0].pos, { row: 1, col: 1 }, '10d: 準備 玩家1=(1,1)');
+    checkEq(s0.members[0].pos, { row: 1, col: 1 }, '10d: 準備 民兵1=(1,1)');
     checkEq(s0.members[1].pos, { row: 1, col: 9 }, '10d: 準備 丧尸1=(1,9)');
     const snap = JSON.stringify(s0);
     const rs = new RngScript();
@@ -2020,13 +2277,9 @@ function main() {
   // =============================================== 11) 行動規則（隣接攻撃・移動選路）
   // 11a. 不相邻なら攻撃しない（移動する）／距離が 1 減る
   {
-    const s = placedState(
-      {
-        human: { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-      },
+    const s = placedState(compoUniform(1, 1),
       [{ row: 5, col: 5 }, { row: 1, col: 1 }], [90, 40]);
-    checkEq(s.order[0], '玩家1', '11a: 先手は 玩家1');
+    checkEq(s.order[0], '民兵1', '11a: 先手は 民兵1');
     const rs = new RngScript();
     rs.pushInt(0, 0, 1); // 最小距離 7 の並列 2 マス（(4,5),(5,4)）の行列表順抽選
     const lenBefore = s.log.length;
@@ -2035,24 +2288,23 @@ function main() {
     checkEq(s2.log.length, lenBefore + 1, '11a: 追記は移動行 1 行のみ');
     const mv = s2.log[lenBefore];
     checkEq(mv.type, 'action-move', '11a: ログは移動行（攻撃ログは出ない）');
-    checkEq(s2.members.find(m => m.name === '玩家1').pos, { row: 4, col: 5 },
+    checkEq(s2.members.find(m => m.name === '民兵1').pos, { row: 4, col: 5 },
       '11a: 並列 2 マスの先頭（行列表順）へ 1 マス移動');
-    checkEq(mv.text, '玩家1 移动：（5,5）→（4,5）', '11a: 移動行の逐字');
+    checkEq(mv.text, '民兵1 移动：（5,5）→（4,5）', '11a: 移動行の逐字');
   }
   // 11b. 隣接時は必ず攻撃し、目標は「隣接敵の集合」から選ばれる
   //      （遠方の敵がいても抽選の分母に含まれない。raw=0.5 は
   //        隣接集合 k=1 → 0 番 / 全敵 k=2 → 1 番になるため判別できる）
   {
-    const s = placedState(
-      {
-        human: { count: 2, hp: 12, attack: 7, agility: 0, dmgMin: 1, dmgMax: 1 },
-        zombie: { count: 2, hp: 9, attack: 5, agility: 0, dmgMin: 1, dmgMax: 1 },
-      },
+    const s = craftPlaced(craftStats({
+      human: { count: 2, hp: 12, attack: 7, agility: 0, dmgMin: 1, dmgMax: 1 },
+      zombie: { count: 2, hp: 9, attack: 5, agility: 0, dmgMin: 1, dmgMax: 1 },
+    }),
       [{ row: 3, col: 4 }, { row: 8, col: 8 }, { row: 3, col: 3 }, { row: 1, col: 1 }],
-      [10, 20, 90, 80]); // 丧尸1(90) → 丧尸2(80) → 玩家1(10) → 玩家2(20)? → 降順で先手は 丧尸1
-    checkEq(s.order[0], '丧尸1', '11b: 先手は 丧尸1（隣接する 玩家1 と離れた 玩家2 がいる盤面）');
+      [10, 20, 90, 80]); // 丧尸1(90) → 丧尸2(80) → 民兵1(10) → 民兵2(20)? → 降順で先手は 丧尸1
+    checkEq(s.order[0], '丧尸1', '11b: 先手は 丧尸1（隣接する 民兵1 と離れた 民兵2 がいる盤面）');
     const rs = new RngScript();
-    rs.pushInt(0, 0, 0); // 隣接集合は 玩家1 のみ（k=1）。全敵なら k=2 で 玩家2 が当たる
+    rs.pushInt(0, 0, 0); // 隣接集合は 民兵1 のみ（k=1）。全敵なら k=2 で 民兵2 が当たる
     rs.pushDie(6, 7);    // 攻撃 d7=6 ＞ 攻击5 → 失敗
     const lenBefore = s.log.length;
     const s2 = GE.takeTurn(s, rs.rng);
@@ -2060,78 +2312,63 @@ function main() {
     const acts = actionEntriesBetween(s2, lenBefore);
     checkEq(acts.length, 1, '11b: 1 行動');
     checkEq(acts[0].type, 'action-fail', '11b: 攻撃失敗行');
-    check(acts[0].text.startsWith('丧尸1 → 玩家1：'),
-      '11b: 目標は隣接した 玩家1（遠方の 玩家2 は候補外）: ' + acts[0].text);
+    check(acts[0].text.startsWith('丧尸1 → 民兵1：'),
+      '11b: 目標は隣接した 民兵1（遠方の 民兵2 は候補外）: ' + acts[0].text);
   }
   // 11c. 並列選路は同 seed で再現し、抽選値で選択先が変わる
   {
-    const cfg = {
-      human: { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
-    // 玩家1(5,5)、丧尸1(4,4)（斜め隣接は攻撃不可）→ 最小距離 1 の並列 2 マス
+    const cfg = compoUniform(1, 1);
+    // 民兵1(5,5)、丧尸1(4,4)（斜め隣接は攻撃不可）→ 最小距離 1 の並列 2 マス
     for (const pick of [0, 1]) {
       const rs = new RngScript();
       rs.pushInt(pick, 0, 1); // 並列候補 (4,5)(5,4) の行列表順で pick 番
       const s = placedState(deepCopy(cfg), [{ row: 5, col: 5 }, { row: 4, col: 4 }], [90, 40]);
       const s2 = GE.takeTurn(s, rs.rng);
       const expectCell = pick === 0 ? { row: 4, col: 5 } : { row: 5, col: 4 };
-      checkEq(s2.members.find(m => m.name === '玩家1').pos, expectCell,
+      checkEq(s2.members.find(m => m.name === '民兵1').pos, expectCell,
         '11c: 並列候補の抽選値 ' + pick + ' は行列表順の ' + JSON.stringify(expectCell));
       // 同一スクリプトの再現性（同じ並列局面・同じ抽選値 → 同じ移動先）
       const again = placedState(deepCopy(cfg), [{ row: 5, col: 5 }, { row: 4, col: 4 }], [90, 40]);
       const rs2 = new RngScript();
       rs2.pushInt(pick, 0, 1);
       const again2 = GE.takeTurn(again, rs2.rng);
-      checkEq(again2.members.find(m => m.name === '玩家1').pos, expectCell,
+      checkEq(again2.members.find(m => m.name === '民兵1').pos, expectCell,
         '11c: 並列選路は同 seed で再現する pick=' + pick);
     }
   }
   // 11d. 受限格: 角に追い詰められた行動者は空きマスだけを候補にする
   {
-    const s = placedState(
-      {
-        human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-      },
+    const s = placedState(compoUniform(2, 1),
       [{ row: 1, col: 1 }, { row: 2, col: 1 }, { row: 1, col: 5 }],
-      [90, 80, 40]); // 先手 玩家1=(1,1)。下は味方、右は空き、上と左は界外
+      [90, 80, 40]); // 先手 民兵1=(1,1)。下は味方、右は空き、上と左は界外
     const rs = new RngScript();
     rs.pushInt(0, 0, 0); // 候補は (1,2) のみ（候補 1 マスでも抽選する）
     const s2 = GE.takeTurn(s, rs.rng);
     checkEq(rs.used, 1, '11d: 候補 1 マスでも 1 抽選');
-    checkEq(s2.members.find(m => m.name === '玩家1').pos, { row: 1, col: 2 },
+    checkEq(s2.members.find(m => m.name === '民兵1').pos, { row: 1, col: 2 },
       '11d: 唯一の空き候補へ移動');
-    checkEq(s2.log[s2.log.length - 1].text, '玩家1 移动：（1,1）→（1,2）',
+    checkEq(s2.log[s2.log.length - 1].text, '民兵1 移动：（1,1）→（1,2）',
       '11d: 移動行の逐字');
   }
   // 11e. 四面皆阻: 候補ゼロ → 移動不能行・乱数 0 回・pos 不変
   {
-    const s = placedState(
-      {
-        human: { count: 3, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-      },
+    const s = placedState(compoUniform(3, 1),
       [{ row: 1, col: 1 }, { row: 1, col: 2 }, { row: 2, col: 1 }, { row: 9, col: 9 }],
-      [90, 80, 70, 40]); // 玩家1=(1,1): 右と下は味方、上と左は界外、敵は遠方
+      [90, 80, 70, 40]); // 民兵1=(1,1): 右と下は味方、上と左は界外、敵は遠方
     const rs = new RngScript(); // 1 回でも乱数を使ったら例外で落ちる
     const lenBefore = s.log.length;
     const s2 = GE.takeTurn(s, rs.rng);
     checkEq(rs.used, 0, '11e: 移動不能は乱数を消費しない');
-    checkEq(s2.members.find(m => m.name === '玩家1').pos, { row: 1, col: 1 },
+    checkEq(s2.members.find(m => m.name === '民兵1').pos, { row: 1, col: 1 },
       '11e: pos は不変');
     checkEq(s2.log.length, lenBefore + 1, '11e: 移動不能行 1 行だけ追記');
     checkEq(s2.log[lenBefore].type, 'action-blocked', '11e: ログ type は action-blocked');
-    checkEq(s2.log[lenBefore].text, '玩家1 无法移动（无路可走）', '11e: 移動不能行の逐字');
+    checkEq(s2.log[lenBefore].text, '民兵1 无法移动（无路可走）', '11e: 移動不能行の逐字');
     checkEq(s2.turnIndex, (s.turnIndex + 1) % s.order.length, '11e: 順序は進む');
   }
   // 11f. 倒地マスは空き扱い（入れる）・倒地者は攻撃目標にならない
   {
-    const s = placedState(
-      {
-        human: { count: 1, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 2, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-      },
+    const s = placedState(compoUniform(1, 2),
       [{ row: 1, col: 1 }, { row: 1, col: 2 }, { row: 1, col: 9 }],
       [90, 40, 30]);
     // 丧尸1（(1,2)）を倒地させる（state 保持の純データとして末位 pos を残す）
@@ -2140,17 +2377,16 @@ function main() {
     const rs = new RngScript();
     rs.pushInt(0, 0, 0); // (1,2) は倒地マスなので入れる。距離最小は一意に (1,2)
     const s2 = GE.takeTurn(s, rs.rng);
-    checkEq(s2.members.find(m => m.name === '玩家1').pos, { row: 1, col: 2 },
+    checkEq(s2.members.find(m => m.name === '民兵1').pos, { row: 1, col: 2 },
       '11f: 倒地者のマスへ入れる');
   }
   {
     // 隣接敵に倒地者が混ざっても目標集合から除外される
     // （raw=0.5 は 生存のみ k=1 → 0 番=丧尸1 / 倒地込み k=2 → 1 番=丧尸2）
-    const s = placedState(
-      {
-        human: { count: 1, hp: 12, attack: 7, agility: 0, dmgMin: 1, dmgMax: 1 },
-        zombie: { count: 2, hp: 9, attack: 5, agility: 0, dmgMin: 1, dmgMax: 1 },
-      },
+    const s = craftPlaced(craftStats({
+      human: { count: 1, hp: 12, attack: 7, agility: 0, dmgMin: 1, dmgMax: 1 },
+      zombie: { count: 2, hp: 9, attack: 5, agility: 0, dmgMin: 1, dmgMax: 1 },
+    }),
       [{ row: 1, col: 4 }, { row: 2, col: 4 }, { row: 1, col: 5 }],
       [90, 40, 30]);
     s.members.find(m => m.name === '丧尸2').hp = 0;
@@ -2165,14 +2401,13 @@ function main() {
     checkEq(rs.used, 4, '11f: 命中経路の乱数 4 回');
     const acts = actionEntriesBetween(s2, lenBefore);
     checkEq(acts.length, 1, '11f: 1 行動');
-    check(acts[0].text.startsWith('玩家1 → 丧尸1：'),
+    check(acts[0].text.startsWith('民兵1 → 丧尸1：'),
       '11f: 倒地した 丧尸2 は目標に選ばれない: ' + acts[0].text);
   }
   // 11g. rng 消費の総括（順序表記を含む順序表の行尾座標は 10a で検証済み）
   {
     // 開戦直後の乱数消費 = 初期配置（人数分）＋ 先攻 d100（人数分）
-    const cfg = deepCopy(GE.DEFAULT_CONFIG);
-    cfg.human.count = 3; cfg.zombie.count = 3;
+    const cfg = compoUniform(3, 3);
     const rs = new RngScript();
     for (let i = 0; i < 6; i++) rs.pushInt(i, 0, 80 - i); // 配置 6 抽選（値は任意）
     for (let i = 0; i < 6; i++) rs.pushDie(100 - i * 7, 100); // d100 6 回
@@ -2184,22 +2419,19 @@ function main() {
 
   // 11h. 行動順表の行尾座標（重投序列并存の逐字サンプル）
   {
-    const cfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-    };
+    const cfg = compoUniform(2, 1);
     const draws = placementDraws(defaultPos(2, 1)); // (1,2)(2,3)(2,2)
     const rs = new RngScript();
     for (const d of draws) rs.pushInt(d.v, 0, d.k - 1);
-    rs.pushDie(80, 100); rs.pushDie(80, 100); rs.pushDie(85, 100); // 玩家2 人が同点
+    rs.pushDie(80, 100); rs.pushDie(80, 100); rs.pushDie(85, 100); // 民兵2 人が同点
     rs.pushDie(10, 100); rs.pushDie(10, 100);                      // 重投 1（まだ同点）
     rs.pushDie(5, 100); rs.pushDie(95, 100);                       // 重投 2（決着）
     const s = GE.startBattle(cfg, rs.rng);
     const ord = s.log.filter(e => e.type === 'order').map(e => e.text);
     checkEq(ord, [
       '1. 丧尸1（d100=85）（2,2）',
-      '2. 玩家2（d100=80→10→95）（2,3）',
-      '3. 玩家1（d100=80→10→5）（1,2）',
+      '2. 民兵2（d100=80→10→95）（2,3）',
+      '3. 民兵1（d100=80→10→5）（1,2）',
     ], '11h: 順序表は重投序列の後に行尾座標を付す（逐字）');
   }
 
@@ -2208,26 +2440,22 @@ function main() {
   //      「追記 2 行目は折り返し round 行」経路が 223 戦圧測でも 0 回だった
   //      （blocked 事象が発生しない）ため、ここで実動保証する。
   {
-    const s = placedState(
-      {
-        human: { count: 3, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 1, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
-      },
+    const s = placedState(compoUniform(3, 1),
       [{ row: 1, col: 1 }, { row: 1, col: 2 }, { row: 2, col: 1 }, { row: 9, col: 9 }],
-      [10, 90, 80, 40]); // 順序: 玩家2(90)→玩家3(80)→丧尸1(40)→玩家1(10)。玩家1 が末尾
-    checkEq(s.order[s.order.length - 1], '玩家1', '11i: 玩家1 は行動順の末尾');
-    s.turnIndex = s.order.length - 1; // 玩家1 の番へ（開戦直後は先頭のため）
+      [10, 90, 80, 40]); // 順序: 民兵2(90)→民兵3(80)→丧尸1(40)→民兵1(10)。民兵1 が末尾
+    checkEq(s.order[s.order.length - 1], '民兵1', '11i: 民兵1 は行動順の末尾');
+    s.turnIndex = s.order.length - 1; // 民兵1 の番へ（開戦直後は先頭のため）
     const rs = new RngScript(); // 1 回でも乱数を使ったら例外で落ちる
     const lenBefore = s.log.length;
     const r = GE.stepBattle(s, rs.rng);
     checkEq(rs.used, 0, '11i: 末尾での受阻も乱数を消費しない');
     checkEq(r.event.kind, 'blocked', '11i: event は blocked');
-    checkEq(r.event.actor, '玩家1', '11i: event.actor は 玩家1');
+    checkEq(r.event.actor, '民兵1', '11i: event.actor は 民兵1');
     checkEq(r.state.turnIndex, 0, '11i: 順序は折り返して先頭へ');
     checkEq(r.state.round, s.round + 1, '11i: round は +1');
     checkEq(r.state.log.length, lenBefore + 2, '11i: blocked 行＋round 行の 2 行追記');
     checkEq(r.state.log[lenBefore].type, 'action-blocked', '11i: 追記 1 行目は action-blocked');
-    checkEq(r.state.log[lenBefore].text, '玩家1 无法移动（无路可走）', '11i: 移動不能行の逐字');
+    checkEq(r.state.log[lenBefore].text, '民兵1 无法移动（无路可走）', '11i: 移動不能行の逐字');
     checkEq(r.state.log[lenBefore + 1].type, 'round', '11i: 追記 2 行目は折り返し round 行');
     checkEq(r.state.log[lenBefore + 1].text, '── 第 ' + (s.round + 1) + ' 轮 ──', '11i: round 行の逐字');
     const verdict = stepOk(s, r.state, r.event);
@@ -2278,13 +2506,103 @@ function main() {
     checkEq(DOC.getElementById('config-screen').hidden, false, '初期は配置画面が見える');
     checkEq(DOC.getElementById('battle-screen').hidden, true, '初期は戦場画面が隠れる');
     checkEq(DOC.getElementById('faction-configs').children.length, 2, '設定パネルは両陣営分');
-    checkEq(DOC.getElementById('human-count').value, '1', '人類人数の初期値');
-    checkEq(DOC.getElementById('human-hp').value, '12', '人類 HP の初期値');
-    checkEq(DOC.getElementById('zombie-hp').value, '9', '喪屍 HP の初期値');
-    checkEq(DOC.getElementById('zombie-attack').value, '5', '喪屍攻撃の初期値');
+    // S6: 各兵種行の数量入力（id=<faction>-<typeId>）が既定編成の値で並ぶ
+    for (const f of ['human', 'zombie']) {
+      for (const t of GE.UNIT_TYPES[f]) {
+        const el = DOC.getElementById(f + '-' + t.id);
+        checkEq(el && el.value, String(GE.DEFAULT_CONFIG[f].composition[t.id] || 0),
+          'S6: ' + f + '/' + t.id + ' の数量入力が既定編成どおり');
+        checkEq(el.disabled, false, 'S6: ' + f + '/' + t.id + ' は未開戦で編集可');
+      }
+      checkEq(DOC.getElementById('budget-num-' + f).textContent, '已用 32 / 100',
+        'S6: ' + f + ' の予算バーは既定編成 32 点/既定予算 100');
+    }
+    // S6: 全局の配点予算入力（既定 100・未開戦で編集可）
+    checkEq(DOC.getElementById('config-budget').value, '100', 'S6: 配点予算入力の既定値は 100');
+    checkEq(DOC.getElementById('config-budget').disabled, false, 'S6: 配点予算入力は未開戦で編集可');
     // 初期站位の全局セレクト（UI 側は選択値を config.placement として渡す）
     checkEq(DOC.getElementById('config-placement').disabled, false,
       '初期站位セレクトは未開戦では編集可');
+
+    // --- S7: 予算バー（数量入力で「已用 X / 予算」が同期し、超支で over が付く。
+    //     予算入力の変更も両陣営のバーに即時反映する） ---
+    {
+      const fire = (id) => {
+        const el = DOC.getElementById(id);
+        (el.listeners.input || []).forEach((fn) => fn());
+      };
+      const setVal = (id, v) => { DOC.getElementById(id).value = String(v); fire(id); };
+      const hBar = DOC.getElementById('budget-bar-human');
+      const hNum = DOC.getElementById('budget-num-human');
+      setVal('human-guard', 0); setVal('human-gunner', 0); setVal('human-scout', 0);
+      setVal('human-militia', 1);
+      checkEq(hNum.textContent, '已用 10 / 100', 'S7: 数量入力で予算バーが同期（10 点/予算 100）');
+      setVal('human-militia', 11);
+      checkEq(hNum.textContent, '已用 110 / 100', 'S7: 110 点の表示');
+      checkEq(hBar.classList.contains('over'), true, 'S7: 超支で over クラスが付く');
+      setVal('human-militia', 1); setVal('human-scout', 2);
+      checkEq(hNum.textContent, '已用 26 / 100', 'S7: 26 点に戻す');
+      checkEq(hBar.classList.contains('over'), false, 'S7: 予算内に戻ると over が外れる');
+      // 予算入力を 20 に下げると表示が「/ 20」へ切り替わり、26 > 20 で即 over
+      setVal('config-budget', 20);
+      checkEq(hNum.textContent, '已用 26 / 20', 'S7: 予算入力の変更がバーに即時反映（/ 20）');
+      checkEq(hBar.classList.contains('over'), true, 'S7: 予算を下げると超支に変わる');
+      setVal('config-budget', 100);
+      checkEq(hNum.textContent, '已用 26 / 100', 'S7: 予算を戻すと over が外れる');
+      checkEq(hBar.classList.contains('over'), false, 'S7: 予算 100 では 26 点は予算内');
+      // 既定編成へ戻す（以降の UI 流程テストは既定 trio・予算 100 の状態から進む）
+      setVal('human-militia', 0); setVal('human-guard', 1);
+      setVal('human-gunner', 1); setVal('human-scout', 1);
+      checkEq(hNum.textContent, '已用 32 / 100', 'S7: 既定編成に復元（32/100）');
+    }
+
+    // --- S8: 設定入力 → readConfig → btn-start 経路で編成形状を検証 ---
+    {
+      const clickStart = () => {
+        const el = DOC.getElementById('btn-start');
+        (el.listeners.click || []).forEach((fn) => fn());
+      };
+      const set2 = (id, v) => { DOC.getElementById(id).value = String(v); };
+      const zeroAll = () => {
+        for (const f of ['human', 'zombie']) {
+          for (const t of GE.UNIT_TYPES[f]) set2(f + '-' + t.id, 0);
+        }
+      };
+      GUI.resetToConfig();
+      zeroAll();
+      // DOM 桩の <select>/<input> は HTML 既定値を持たないため全局値を明示する
+      DOC.getElementById('config-placement').value = 'mixed';
+      set2('config-budget', 100);
+      set2('human-militia', 1); set2('human-scout', 2);
+      set2('zombie-walker', 1); set2('zombie-horde', 6);
+      clickStart();
+      checkEq(GUI.getMode(), 'live', 'S8: btn-start で開戦できる');
+      checkEq(GUI.getBattleState().members.map((m) => m.name),
+        ['民兵1', '侦察兵1', '侦察兵2', '丧尸1', '尸潮1', '尸潮2', '尸潮3', '尸潮4', '尸潮5', '尸潮6'],
+        'S8: readConfig が編成形状を返し、成員が表序どおり展開される');
+      GUI.resetToConfig();
+      zeroAll();
+      DOC.getElementById('config-placement').value = 'mixed';
+      set2('zombie-walker', 1);                          // 丧屍側は正当のまま
+      set2('config-budget', 30);                         // 予算を 30 に絞る
+      set2('human-guard', 2); set2('human-gunner', 1);  // 人類 24+12=36 点 > 30
+      clickStart();
+      checkEq(GUI.getMode(), 'idle', 'S8: 予算超過は開戦しない');
+      check(DOC.getElementById('config-error').textContent.includes('超出配点预算 30 点'),
+        'S8: 設定予算 30 の中文エラー: ' + DOC.getElementById('config-error').textContent);
+      // V9 経由の UI 表示: 予算欄に 0 を入れて開戦 → 予算自体の中文エラー
+      set2('config-budget', 0);
+      clickStart();
+      check(DOC.getElementById('config-error').textContent.includes('配点预算必须是 1～9999 的整数'),
+        'S8: 不正予算の中文エラー: ' + DOC.getElementById('config-error').textContent);
+      for (const f of ['human', 'zombie']) {
+        for (const t of GE.UNIT_TYPES[f]) {
+          set2(f + '-' + t.id, GE.DEFAULT_CONFIG[f].composition[t.id] || 0);
+        }
+      }
+      set2('config-budget', 100);
+      DOC.getElementById('config-error').textContent = '';
+    }
 
     // カード / チップ / 飄字の参照ヘルパ（buildCards の子順に依存:
     // [0]emoji [1]血条(>fill) [2]飄字レイヤー。名前は title 属性）
@@ -2298,8 +2616,8 @@ function main() {
     // --- 9b. 開戦: 2v2。逐次演出をエンジンのステップ連鎖と毎歩突き合わせる ---
     GUI.setSpeed('middle');
     const uiCfg = {
-      human: { count: 2, hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 2, hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      human: { composition: { militia: 2 } },
+      zombie: { composition: { walker: 2 } },
     };
     // 混合ランダム配置になった 2v2 は种子ごとに進行が変わるため、
     // hit・倒地・スキップ・移動の 4 種 event がすべて出る种子を固定して使う
@@ -2341,12 +2659,18 @@ function main() {
     checkEq(spy.size(), 1, '予約は 1 件');
     checkEq(DOC.getElementById('config-screen').hidden, true, '戦場では配置画面を隠す');
     checkEq(DOC.getElementById('battle-screen').hidden, false, '戦場画面を表示');
-    check(DOC.getElementById('human-count').disabled === true
-      && DOC.getElementById('human-hp').disabled === true
-      && DOC.getElementById('zombie-attack').disabled === true
-      && DOC.getElementById('config-placement').disabled === true
-      && DOC.getElementById('btn-start').disabled === true,
-      '開戦で設定入力・初期站位・開戦ボタンをロック');
+    {
+      let allLocked = true;
+      for (const f of ['human', 'zombie']) {
+        for (const t of GE.UNIT_TYPES[f]) {
+          if (!DOC.getElementById(f + '-' + t.id).disabled) allLocked = false;
+        }
+      }
+      check(allLocked
+        && DOC.getElementById('config-placement').disabled === true
+        && DOC.getElementById('btn-start').disabled === true,
+        'S6: 開戦で全数量入力・初期站位・開戦ボタンをロック');
+    }
     check(DOC.getElementById('btn-skip').disabled === false, '跳到結果ボタンは有効');
     checkEq(GUI.getBattleState(), refStates[0], '開戦直後の state がエンジン startBattle と一致');
     checkEq(DOC.getElementById('order-strip').children.length, 4, '順序帯は全員分のチップ');
@@ -2358,11 +2682,11 @@ function main() {
       '先頭マスは grid-cell（(1,1) は市松模様の alt）');
     checkEq(DOC.getElementById('battle-grid').children[1].className, 'grid-cell',
       '隣接マス (1,2) は通常セル');
-    checkEq(titleOf('玩家1'), '玩家1', 'カードの title 属性に名前');
+    checkEq(titleOf('民兵1'), '民兵1', 'カードの title 属性に名前');
     checkEq(titleOf('丧尸1'), '丧尸1', 'カードの title 属性に名前（喪屍）');
-    checkEq(cardOf('玩家1').children[0].textContent, '🧑', '人類は 🧑');
+    checkEq(cardOf('民兵1').children[0].textContent, '🧑', '人類は 🧑');
     checkEq(cardOf('丧尸1').children[0].textContent, '🧟', '喪屍は 🧟');
-    checkEq(hpFillWidth('玩家1'), '100%', '血条幅の初期表示');
+    checkEq(hpFillWidth('民兵1'), '100%', '血条幅の初期表示');
     // カードの transform は state の pos と同期する（マス座標 × 44px）
     for (const m of refStates[0].members) {
       checkEq(transformOf(m.name), transformFor(m.pos),
@@ -2467,8 +2791,8 @@ function main() {
     // --- 9e. 跳到結果: 演出中途から一気に終局へ（整場一括と完全一致） ---
     GUI.setSpeed('middle');
     const skipCfg = {
-      human: { count: 3, hp: 15, attack: 4, agility: 3, dmgMin: 1, dmgMax: 3 },
-      zombie: { count: 3, hp: 11, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      human: { composition: { militia: 3 } },
+      zombie: { composition: { walker: 3 } },
     };
     const skipRef = GE.runBattle(deepCopy(skipCfg), GE.createRng(779));
     GUI.startBattle(deepCopy(skipCfg), GE.createRng(779));
@@ -2517,12 +2841,18 @@ function main() {
     checkEq(GUI.getLogEntries(), [], '重置でログを破棄');
     checkEq(DOC.getElementById('config-screen').hidden, false, '配置画面を再表示');
     checkEq(DOC.getElementById('battle-screen').hidden, true, '戦場画面を隠す');
-    check(DOC.getElementById('human-count').disabled === false
-      && DOC.getElementById('human-hp').disabled === false
-      && DOC.getElementById('zombie-hp').disabled === false
-      && DOC.getElementById('config-placement').disabled === false
-      && DOC.getElementById('btn-start').disabled === false,
-      '重置で設定入力・初期站位・開戦ボタンが再び編集可');
+    {
+      let allEnabled = true;
+      for (const f of ['human', 'zombie']) {
+        for (const t of GE.UNIT_TYPES[f]) {
+          if (DOC.getElementById(f + '-' + t.id).disabled) allEnabled = false;
+        }
+      }
+      check(allEnabled
+        && DOC.getElementById('config-placement').disabled === false
+        && DOC.getElementById('btn-start').disabled === false,
+        'S6: 重置で全数量入力・初期站位・開戦ボタンが再び編集可');
+    }
     checkEq(DOC.getElementById('battle-grid').children.length, 0, '戦場グリッド（マス＋カード）を破棄');
     checkEq(DOC.getElementById('order-strip').children.length, 0, '順序帯を破棄');
     checkEq(DOC.getElementById('battle-log').children.length, 0, 'ログ表示を破棄');
@@ -2545,7 +2875,7 @@ function main() {
     GUI.resetToConfig();
     threw = false;
     const badUICfg = deepCopy(GE.DEFAULT_CONFIG);
-    badUICfg.human.count = 0;
+    for (const t of GE.UNIT_TYPES.human) badUICfg.human.composition[t.id] = 0;
     try { GUI.startBattle(badUICfg); } catch (e) { threw = true; }
     check(threw, '不正設定の startBattle は例外を投げる');
     checkEq(GUI.getMode(), 'idle', '失敗後も idle のまま');
@@ -2555,9 +2885,11 @@ function main() {
     const savedMax = GE.MAX_STEPS;
     try {
       GE.MAX_STEPS = 5;
+      // 5 歩では誰も倒れない組合せ（militia 12HP 対 rotwalker 18HP、双方の
+      // 伤害 ≤3 → 最大 9 < 両方の HP）で確定的に上限 draw へ落とす
       const drawCfg = {
-        human: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
-        zombie: { count: 1, hp: 9, attack: 0, agility: 0, dmgMin: 1, dmgMax: 1 },
+        human: { composition: { militia: 1 } },
+        zombie: { composition: { rotwalker: 1 } },
       };
       GUI.startBattle(drawCfg, GE.createRng(785));
       spy.pump();
@@ -2578,19 +2910,39 @@ function main() {
     // 複数の倒地を含む一戦（決定論的に選定した固定种子。以後のシーム検査は
     // この一戦を同期スケジューラで全拍駆動して行う）
     {
+      // 異構成の分割戦（scout×4 対 horde×5+walker×1）。move/blocked/倒地を
+      // すべて含む种子を決定論的に探索して固定する（#18: 異構成で検証する）
       const jCfg = {
         placement: 'split',
-        human: { count: 6, hp: 12, attack: 5, agility: 3, dmgMin: 1, dmgMax: 3 },
-        zombie: { count: 6, hp: 9, attack: 6, agility: 2, dmgMin: 1, dmgMax: 4 },
+        human: { composition: { scout: 4 } },
+        zombie: { composition: { horde: 5, walker: 1 } },
       };
-      const jSeed = 87;
-      const jrr = GE.createRng(jSeed);
-      const jStates = [GE.startBattle(deepCopy(jCfg), jrr)];
-      const jEvents = [];
-      while (!jStates[jStates.length - 1].finished) {
-        const jr = GE.stepBattle(jStates[jStates.length - 1], jrr);
-        jStates.push(jr.state);
-        jEvents.push(jr.event);
+      let jSeed = 87;
+      let jStates = null;
+      let jEvents = null;
+      for (;;) {
+        const jrr = GE.createRng(jSeed);
+        const candStates = [GE.startBattle(deepCopy(jCfg), jrr)];
+        const candEvents = [];
+        while (!candStates[candStates.length - 1].finished) {
+          const jr = GE.stepBattle(candStates[candStates.length - 1], jrr);
+          candStates.push(jr.state);
+          candEvents.push(jr.event);
+        }
+        const kinds = new Set(candEvents.map(e => e.kind));
+        if (kinds.has('move') && kinds.has('blocked')
+          && candEvents.some(e => e.kind === 'hit' && e.downed === true)) {
+          jStates = candStates;
+          jEvents = candEvents;
+          break;
+        }
+        jSeed++;
+        if (jSeed > 87 + 2000) {
+          pushFailure('9j: move/blocked/倒地が全部出る种子が見つからない');
+          jStates = candStates;
+          jEvents = candEvents;
+          break;
+        }
       }
       check(jEvents.some(e => e.kind === 'move'), '9j: 移動拍を含む');
       check(jEvents.some(e => e.kind === 'blocked'), '9j: 移動不能拍を含む');
@@ -2614,8 +2966,19 @@ function main() {
       spy.delays.length = 0;
       GUI.startBattle(deepCopy(jCfg), GE.createRng(jSeed));
       checkEq(GUI.getMode(), 'live', '9j: 開戦で live へ');
-      checkEq(DOC.getElementById('battle-grid').children.length, 81 + 12,
-        'S7: 6v6 でも #battle-grid の子数は 81+全員分（追加ノードは骨組み層へ）');
+      checkEq(DOC.getElementById('battle-grid').children.length, 81 + jStates[0].members.length,
+        'S7: 異構成でも #battle-grid の子数は 81+全員分（追加ノードは骨組み層へ）');
+      // S9: カード/順序帯の Emoji は兵種表の typeId 由来（#16 S5 の子順凍結は維持）
+      for (const m of jStates[0].members) {
+        const t = GE.UNIT_TYPES[m.faction].find((x) => x.id === m.typeId);
+        check(!!t, 'S9: ' + m.name + ' の typeId が実在');
+        if (t) {
+          checkEq(cardOf(m.name).children[0].textContent, t.emoji,
+            'S9: カード Emoji は兵種专属: ' + m.name);
+          checkEq(chipOf(m.name).children[0].textContent, t.emoji,
+            'S9: 順序帯 Emoji は兵種专属: ' + m.name);
+        }
+      }
 
       // S5/S6: カードの子順は [0]emoji [1]血条 [2]飄字層（既存検査の索引依存）。
       // 名前は末尾に追加する以外許されない。transform は 64px の独立計算と突き合わせる

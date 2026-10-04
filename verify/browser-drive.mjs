@@ -318,7 +318,7 @@ const STRUCT_EXPR = `(() => {
     logCount: log.children.length,
     logLines: [...log.children].map((d) => d.textContent),
     state: st ? { order: st.order, turnIndex: st.turnIndex, steps: st.steps, rolls: st.rolls, finished: st.finished,
-      members: st.members.map((m) => ({ name: m.name, faction: m.faction, pos: m.pos, downed: m.downed })) } : null
+      members: st.members.map((m) => ({ name: m.name, faction: m.faction, typeId: m.typeId, pos: m.pos, downed: m.downed })) } : null
   };
 })()`;
 
@@ -347,9 +347,20 @@ function floatLogAgree(floats, lastLogs) {
 }
 
 /* ---- 戦闘ログの解析（仕様第 5 条との突き合わせ） --------------------- */
-const HUMAN_MAX_HP = 12, ZOMBIE_MAX_HP = 9;
-const HUMAN_DMG = [1, 3], ZOMBIE_DMG = [1, 5];
-const EXPECTED_NAMES = ['玩家1', '玩家2', '玩家3', '丧尸1', '丧尸2', '丧尸3'];
+// #18 T6: 陣営定数（HP / 伤害区間 / 名前接頭辞）は廃止し、
+// getBattleState().members から name → { faction, maxHp, dmgMin, dmgMax, typeId }
+// の写像を作って検証源にする（四属性と typeId は戦闘中不変）
+const T_EMOJI = {
+  militia: '🧑', guard: '🛡️', gunner: '🔫', scout: '🏃',
+  walker: '🧟', rotwalker: '🦠', shredder: '🩸', sprinter: '💨', horde: '🐛',
+};
+function memberInfoOf(members) {
+  const info = {};
+  for (const m of members || []) {
+    info[m.name] = { faction: m.faction, maxHp: m.maxHp, dmgMin: m.dmgMin, dmgMax: m.dmgMax, typeId: m.typeId };
+  }
+  return info;
+}
 
 function parseOrderLine(l) {
   // 行尾に初期座標（3,4）を伴う（规格第 7 条）
@@ -411,14 +422,16 @@ function analyzeLog(lines) {
 
 /* ログ全文を「状態リプレイ」で検証する。違反があればその行を violations へ。
    移動・移動不能も行動順を 1 つ消費するため、循環上の行動者照合に含める */
-function replayValidate(a, cfgMaxHp) {
+function replayValidate(a, info) {
   const v = [];
   const hpNow = {};
   const posNow = {};
   const downedSet = new Set();
   for (const o of a.orderParsed) {
     if (!o) { v.push('order line unparsable: ' + a.order[a.orderParsed.indexOf(o)]); continue; }
-    hpNow[o.name] = o.name.startsWith('玩家') ? cfgMaxHp.human : cfgMaxHp.zombie;
+    const mi = info[o.name];
+    if (!mi) { v.push('unknown order member: ' + o.name); continue; }
+    hpNow[o.name] = mi.maxHp;
     posNow[o.name] = o.pos;
   }
   const isAdj = (p, q) => p && q && Math.abs(p.row - q.row) + Math.abs(p.col - q.col) === 1;
@@ -460,8 +473,10 @@ function replayValidate(a, cfgMaxHp) {
     }
     if (act.kind === 'blocked') continue; // 移動不能: 状態変化なし
     if (downedSet.has(act.target)) v.push('downed target chosen: ' + act.target);
-    const actorHuman = act.actor.startsWith('玩家');
-    if (actorHuman === act.target.startsWith('玩家')) v.push('same-faction attack: ' + act.line);
+    const factionOf = (nm) => (info[nm] ? info[nm].faction : null);
+    if (factionOf(act.actor) === null || factionOf(act.actor) === factionOf(act.target)) {
+      v.push('same-faction attack: ' + act.line);
+    }
     // 隣接攻撃の規則: 攻撃時点で 4 隣接にいること
     if (!isAdj(posNow[act.actor], posNow[act.target])) v.push('attack from non-adjacent cell: ' + act.line);
     if (act.kind === 'fail') {
@@ -472,8 +487,8 @@ function replayValidate(a, cfgMaxHp) {
     } else if (act.kind === 'hit') {
       if (!(act.atkRoll <= act.atkVal)) v.push('hit line but atk roll>attack: ' + act.line);
       if (!(act.dodgeRoll > act.agiVal)) v.push('hit line but dodge roll<=agility: ' + act.line);
-      const range = actorHuman ? HUMAN_DMG : ZOMBIE_DMG;
-      if (act.dmg < range[0] || act.dmg > range[1]) v.push('damage out of range: ' + act.line);
+      const ai = info[act.actor];
+      if (ai && (act.dmg < ai.dmgMin || act.dmg > ai.dmgMax)) v.push('damage out of range: ' + act.line);
       const expect = Math.max(0, hpNow[act.target] - act.dmg);
       if (expect !== act.remaining) v.push('hp mismatch expect ' + expect + ' got ' + act.remaining + ': ' + act.line);
       if (act.remaining === 0 && !act.downed) v.push('hp 0 but no downed mark: ' + act.line);
@@ -582,14 +597,17 @@ async function main() {
   await runStep(1, 'config-screen-defaults', async () => {
     const c = await evalJS(cdp, `(() => {
       const g = (id) => document.getElementById(id);
-      const ids = ['human-count','human-hp','human-attack','human-agility','human-dmgMin','human-dmgMax',
-                   'zombie-count','zombie-hp','zombie-attack','zombie-agility','zombie-dmgMin','zombie-dmgMax'];
+      const ids = ['human-militia','human-guard','human-gunner','human-scout',
+                   'zombie-walker','zombie-rotwalker','zombie-shredder','zombie-sprinter','zombie-horde'];
       const fields = {};
       for (const id of ids) fields[id] = g(id) ? { value: g(id).value, disabled: g(id).disabled } : null;
       const sel = g('config-placement');
       const names = window.GameEngine.createBattleState(window.GameEngine.DEFAULT_CONFIG).members.map((m) => m.name);
       return {
         fields, names,
+        budgetHuman: g('budget-num-human') ? g('budget-num-human').textContent : null,
+        budgetZombie: g('budget-num-zombie') ? g('budget-num-zombie').textContent : null,
+        budgetInput: g('config-budget') ? { value: g('config-budget').value, disabled: g('config-budget').disabled } : null,
         placement: sel ? { value: sel.value, disabled: sel.disabled, options: [...sel.options].map((o) => o.value) } : null,
         screen: window.GameUI.getScreen(),
         configVisible: !g('config-screen').hidden,
@@ -600,8 +618,9 @@ async function main() {
       };
     })()`);
     const f = c.fields;
-    const expect = { 'human-count': '1', 'human-hp': '12', 'human-attack': '4', 'human-agility': '4', 'human-dmgMin': '1', 'human-dmgMax': '3',
-                     'zombie-count': '1', 'zombie-hp': '9', 'zombie-attack': '5', 'zombie-agility': '2', 'zombie-dmgMin': '1', 'zombie-dmgMax': '5' };
+    // 期待値は #18 仕様表の独立写し（既定編成＝特色三人組、他は 0）
+    const expect = { 'human-militia': '0', 'human-guard': '1', 'human-gunner': '1', 'human-scout': '1',
+                     'zombie-walker': '0', 'zombie-rotwalker': '1', 'zombie-shredder': '1', 'zombie-sprinter': '1', 'zombie-horde': '0' };
     let valuesOk = true, editableOk = true;
     for (const id of Object.keys(expect)) {
       if (!f[id] || f[id].value !== expect[id]) valuesOk = false;
@@ -610,20 +629,54 @@ async function main() {
     const placementOk = !!c.placement && c.placement.value === 'mixed' &&
       !c.placement.disabled &&
       JSON.stringify(c.placement.options) === JSON.stringify(['mixed', 'split']);
+    const budgetTextOk = c.budgetHuman === '已用 32 / 100' && c.budgetZombie === '已用 32 / 100'
+      && !!c.budgetInput && c.budgetInput.value === '100' && !c.budgetInput.disabled;
     const passed =
       c.screen === 'config' && c.configVisible && c.battleHidden &&
-      Object.keys(f).length === 12 && valuesOk && editableOk && placementOk &&
+      Object.keys(f).length === 9 && valuesOk && editableOk && placementOk && budgetTextOk &&
       c.startVisible && c.logEmpty &&
-      JSON.stringify(c.names) === JSON.stringify(['玩家1', '丧尸1']) &&
+      JSON.stringify(c.names) === JSON.stringify(['守卫1', '枪手1', '侦察兵1', '腐行者1', '撕裂者1', '疾行者1']) &&
       c.title.includes('丧尸 vs 人类');
+    // 予算バーの動作（実 input イベント経由）: 民兵 +11 → 142 点で超支赤表示 → 戻す。
+    // さらに予算入力を 20 に下げると 32 > 20 で即超支に変わる（両バー連動）
+    const budgetProbe = await evalJS(cdp, `(() => {
+      const e = document.getElementById('human-militia');
+      const num = document.getElementById('budget-num-human');
+      const bar = document.getElementById('budget-bar-human');
+      const bi = document.getElementById('config-budget');
+      const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      const set = (el, v) => { d.set.call(el, String(v)); el.dispatchEvent(new Event('input', { bubbles: true })); };
+      set(e, 11);
+      const over = { num: num.textContent, over: bar.className.includes('over') };
+      set(e, 0);
+      const back = { num: num.textContent, over: bar.className.includes('over') };
+      set(bi, 20);
+      const low = { num: num.textContent, over: bar.className.includes('over') };
+      set(bi, 100);
+      const lowBack = { num: num.textContent, over: bar.className.includes('over') };
+      return { over, back, low, lowBack };
+    })()`);
+    const budgetDynOk = budgetProbe.over.num === '已用 142 / 100' && budgetProbe.over.over === true
+      && budgetProbe.back.num === '已用 32 / 100' && budgetProbe.back.over === false
+      && budgetProbe.low.num === '已用 32 / 20' && budgetProbe.low.over === true
+      && budgetProbe.lowBack.num === '已用 32 / 100' && budgetProbe.lowBack.over === false;
     await shotFull(cdp, join(SHOT_DIR, '01-config.png'));
-    return { passed, names: c.names, valuesOk, editableOk, placement: c.placement, startVisible: c.startVisible, title: c.title };
+    return { passed: passed && budgetDynOk, names: c.names, valuesOk, editableOk, placement: c.placement,
+             budgetTextOk, budgetDynOk, budgetProbe, startVisible: c.startVisible, title: c.title };
   });
 
   /* -- STEP 2: 3v3 で開戦 → 戦場画面 + 順序帯 + ログ + 飘字 ----------- */
   await runStep(2, 'battlefield-3v3-live', async () => {
-    const hc = await setNumberInput(cdp, 'human-count', 3);
-    const zc = await setNumberInput(cdp, 'zombie-count', 3);
+    // 異構成 3v3（人類: 民兵1+偵察兵2 = 26 点 / 丧屍: 丧屍1+尸潮2 = 16 点）
+    const hc = await setNumberInput(cdp, 'human-militia', 1);
+    await setNumberInput(cdp, 'human-guard', 0);
+    await setNumberInput(cdp, 'human-gunner', 0);
+    await setNumberInput(cdp, 'human-scout', 2);
+    await setNumberInput(cdp, 'zombie-walker', 1);
+    await setNumberInput(cdp, 'zombie-rotwalker', 0);
+    await setNumberInput(cdp, 'zombie-shredder', 0);
+    await setNumberInput(cdp, 'zombie-sprinter', 0);
+    const zc = await setNumberInput(cdp, 'zombie-horde', 2);
     const startBtn = await centerOf(cdp, '#btn-start');
     if (!startBtn || startBtn.w < 4) throw new Error('btn-start not visible');
     await clickAt(cdp, startBtn.x, startBtn.y);
@@ -652,16 +705,21 @@ async function main() {
       const pos = posMap.get(x.title);
       return pos && x.transform === transformFor(pos);
     });
+    const step2Info = memberInfoOf(s.state.members);
+    const cardOk = (x) => {
+      const m = step2Info[x.title];
+      return !!m && x.emoji === T_EMOJI[m.typeId] && x.fill === '100%' && !x.downed;
+    };
     const structOk =
       s.screen === 'battle' && s.mode === 'live' && s.configHidden && !s.battleHidden &&
       s.gridCells === 81 &&
       s.humanCards.length === 3 && s.zombieCards.length === 3 &&
-      JSON.stringify(humanNames) === JSON.stringify(['玩家1', '玩家2', '玩家3']) &&
-      JSON.stringify(zombieNames) === JSON.stringify(['丧尸1', '丧尸2', '丧尸3']) &&
-      s.humanCards.every((x) => x.emoji === '🧑' && x.fill === '100%' && !x.downed) &&
-      s.zombieCards.every((x) => x.emoji === '🧟' && x.fill === '100%' && !x.downed) &&
-      s.humanCards.every((x) => x.title && x.title.startsWith('玩家')) &&
-      s.zombieCards.every((x) => x.title && x.title.startsWith('丧尸')) &&
+      JSON.stringify(humanNames) === JSON.stringify(['民兵1', '侦察兵1', '侦察兵2']) &&
+      JSON.stringify(zombieNames) === JSON.stringify(['丧尸1', '尸潮1', '尸潮2']) &&
+      s.humanCards.every(cardOk) &&
+      s.zombieCards.every(cardOk) &&
+      s.humanCards.every((x) => step2Info[x.title] && step2Info[x.title].faction === 'human') &&
+      s.zombieCards.every((x) => step2Info[x.title] && step2Info[x.title].faction === 'zombie') &&
       transformOk &&
       s.chips.length === 6 && s.activeCount === 1 && orderOk &&
       (s.state.steps === 0 ? s.chips.find((x) => x.active).id === 'chip-' + s.state.order[0] : true) &&
@@ -692,9 +750,12 @@ async function main() {
     // 最初の 1 枚を採用する。伤害飘字を優先。
     const slowed = await setAnimRate(cdp, 0.1);
     let caught = null;
-    for (let i = 0; i < 16 && !(caught && caught.hasDmg); i++) {
+    // 飘字の観測証跡は「ログと突き合わせ可能なもの」（伤害 -N / 骰点 d7=N）に
+    // 限る。移動・无法移动の飘字は floatLogAgree が常に false になるため受け付けない
+    for (let i = 0; i < 24 && !(caught && caught.hasDmg); i++) {
       const pre = await evalJS(cdp, SNAP_EXPR);
       if (!pre || pre.floats.length === 0) { await sleep(90); continue; }
+      if (!floatLogAgree(pre.floats, pre.lastLogs)) { await sleep(90); continue; }
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
       const post = await evalJS(cdp, SNAP_EXPR);
       const same = JSON.stringify(pre.floats) === JSON.stringify(post.floats) && pre.logCount === post.logCount;
@@ -770,10 +831,13 @@ async function main() {
       };
     })()`);
 
-    // 倒地拍のスポットライト: 「，倒地！」行が出た拍で #fx-spot に on クラス（中速 800ms＋
-    // 演出尺 900ms の猶予内に観測する。次拍の頭で外れる）
+    // 倒地拍のスポットライト: 「，倒地！」行が新たに増えた拍で #fx-spot に on クラス
+    // （行と on クラスは同一 applyEvent で原子に出る。過去行の存在で待ちを誤魔化され
+    // ないよう基数からの増分で待つ。次拍の頭で外れる＝猶予は中速 800ms＋演出尺 900ms）
+    const downedBase = await evalJS(cdp,
+      "[...document.querySelectorAll('#battle-log .log-action-hit')].filter((r) => r.textContent.includes('，倒地！')).length");
     const downedWaited = await waitFor(cdp,
-      "[...document.querySelectorAll('#battle-log .log-action-hit')].some((r) => r.textContent.includes('，倒地！'))",
+      "[...document.querySelectorAll('#battle-log .log-action-hit')].filter((r) => r.textContent.includes('，倒地！')).length > " + downedBase,
       60000, 100);
     const spotSeen = downedWaited ? await evalJS(cdp,
       "document.getElementById('fx-spot').classList.contains('on')") : false;
@@ -817,7 +881,7 @@ async function main() {
       }));
       return {
         banner: { hidden: g('battle-banner').hidden, title: g('banner-title').textContent, body: g('banner-body').textContent },
-        members: st ? st.members.map((m) => ({ name: m.name, faction: m.faction, hp: m.hp, maxHp: m.maxHp, downed: m.downed, pos: m.pos })) : null,
+        members: st ? st.members.map((m) => ({ name: m.name, faction: m.faction, typeId: m.typeId, hp: m.hp, maxHp: m.maxHp, downed: m.downed, pos: m.pos })) : null,
         winner: st ? st.winner : null,
         survivors: st ? st.survivors : null,
         cards, chips,
@@ -831,7 +895,7 @@ async function main() {
     writeFileSync(join(ROOT, 'verify', 'battle-log-skip-dump.txt'), c.log.map((x) => x.text).join('\n') + '\n', 'utf8');
 
     const ana = analyzeLog(c.log.map((x) => x.text));
-    const replay = replayValidate(ana, { human: HUMAN_MAX_HP, zombie: ZOMBIE_MAX_HP });
+    const replay = replayValidate(ana, memberInfoOf(c.members));
     const victory = parseVictory(ana.victory);
     const bodyLines = c.banner.body.split('\n').filter((x) => x.length > 0);
     const bodyParsed = bodyLines.map((l) => {
@@ -847,8 +911,8 @@ async function main() {
       const chip = c.chips.find((x) => x.id === 'chip-' + m.name);
       if (!card || !chip) return false;
       return card.downed === m.downed && chip.downed === m.downed &&
-        card.emoji === (m.downed ? '💀' : (m.faction === 'human' ? '🧑' : '🧟')) &&
-        chip.emoji === (m.downed ? '💀' : (m.faction === 'human' ? '🧑' : '🧟')) &&
+        card.emoji === (m.downed ? '💀' : T_EMOJI[m.typeId]) &&
+        chip.emoji === (m.downed ? '💀' : T_EMOJI[m.typeId]) &&
         card.title === m.name &&
         (!m.pos || card.transform === transformFor(m.pos));
     });
@@ -898,8 +962,8 @@ async function main() {
 
     const c = await evalJS(cdp, `(() => {
       const g = (id) => document.getElementById(id);
-      const ids = ['human-count','human-hp','human-attack','human-agility','human-dmgMin','human-dmgMax',
-                   'zombie-count','zombie-hp','zombie-attack','zombie-agility','zombie-dmgMin','zombie-dmgMax'];
+      const ids = ['human-militia','human-guard','human-gunner','human-scout',
+                   'zombie-walker','zombie-rotwalker','zombie-shredder','zombie-sprinter','zombie-horde'];
       const fields = {};
       for (const id of ids) fields[id] = g(id) ? { value: g(id).value, disabled: g(id).disabled } : null;
       return {
@@ -913,9 +977,10 @@ async function main() {
         bannerHidden: g('battle-banner').hidden
       };
     })()`);
-    const editableOk = Object.keys(c.fields).length === 12 && Object.keys(c.fields).every((id) => !c.fields[id].disabled) &&
+    const editableOk = Object.keys(c.fields).length === 9 && Object.keys(c.fields).every((id) => !c.fields[id].disabled) &&
       c.placementEnabled;
-    const valuesKept = c.fields['human-count'].value === '3' && c.fields['zombie-count'].value === '3';
+    const valuesKept = c.fields['human-militia'].value === '1' && c.fields['human-scout'].value === '2'
+      && c.fields['zombie-horde'].value === '2';
     const passed = back && c.screen === 'config' && c.battleHidden && c.mode === 'idle' &&
       editableOk && c.startEnabled && c.gridEmpty &&
       c.stripEmpty && c.logEmpty && c.bannerHidden;
@@ -957,7 +1022,7 @@ async function main() {
         winner: st ? st.winner : null,
         survivors: st ? st.survivors : null,
         steps: st ? st.steps : null,
-        members: st ? st.members.map((m) => ({ name: m.name, faction: m.faction, hp: m.hp, maxHp: m.maxHp, downed: m.downed, pos: m.pos })) : null,
+        members: st ? st.members.map((m) => ({ name: m.name, faction: m.faction, typeId: m.typeId, hp: m.hp, maxHp: m.maxHp, downed: m.downed, pos: m.pos })) : null,
         logLines: [...log.children].map((d) => d.textContent),
         logScroll: { top: log.scrollTop, clientH: log.clientHeight, scrollH: log.scrollHeight }
       };
@@ -966,7 +1031,8 @@ async function main() {
     writeFileSync(join(ROOT, 'verify', 'battle-log-dump.txt'), c.logLines.join('\n') + '\n', 'utf8');
 
     const ana = analyzeLog(c.logLines);
-    const replay = replayValidate(ana, { human: HUMAN_MAX_HP, zombie: ZOMBIE_MAX_HP });
+    const step5Info = memberInfoOf(c.members);
+    const replay = replayValidate(ana, step5Info);
     const victory = parseVictory(ana.victory);
     const bodyParsed = c.banner.body.split('\n').filter((x) => x.length > 0).map((l) => {
       const m = l.match(/^(.+?)：剩余 HP (\d+)\/(\d+)$/);
@@ -1004,8 +1070,8 @@ async function main() {
 
     // 阵营分区の実測（初期配置に対して）: 人类は列 1..4、丧尸は列 6..9、
     // 中列 5 空置。最終 pos は移動で中列を跨ぐため、order 行の行尾座標で判定する
-    const splitOk = ana.orderParsed.length === 6 && ana.orderParsed.every((o) => o && (
-      o.name.startsWith('玩家')
+    const splitOk = ana.orderParsed.length === 6 && ana.orderParsed.every((o) => o && step5Info[o.name] && (
+      step5Info[o.name].faction === 'human'
         ? (o.pos.col >= 1 && o.pos.col <= 4)
         : (o.pos.col >= 6 && o.pos.col <= 9)));
     const midColEmpty = ana.orderParsed.every((o) => o && o.pos.col !== 5);

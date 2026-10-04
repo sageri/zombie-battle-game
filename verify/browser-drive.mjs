@@ -607,6 +607,7 @@ async function main() {
         fields, names,
         budgetHuman: g('budget-num-human') ? g('budget-num-human').textContent : null,
         budgetZombie: g('budget-num-zombie') ? g('budget-num-zombie').textContent : null,
+        budgetInput: g('config-budget') ? { value: g('config-budget').value, disabled: g('config-budget').disabled } : null,
         placement: sel ? { value: sel.value, disabled: sel.disabled, options: [...sel.options].map((o) => o.value) } : null,
         screen: window.GameUI.getScreen(),
         configVisible: !g('config-screen').hidden,
@@ -628,28 +629,37 @@ async function main() {
     const placementOk = !!c.placement && c.placement.value === 'mixed' &&
       !c.placement.disabled &&
       JSON.stringify(c.placement.options) === JSON.stringify(['mixed', 'split']);
-    const budgetTextOk = c.budgetHuman === '已用 32 / 32' && c.budgetZombie === '已用 32 / 32';
+    const budgetTextOk = c.budgetHuman === '已用 32 / 100' && c.budgetZombie === '已用 32 / 100'
+      && !!c.budgetInput && c.budgetInput.value === '100' && !c.budgetInput.disabled;
     const passed =
       c.screen === 'config' && c.configVisible && c.battleHidden &&
       Object.keys(f).length === 9 && valuesOk && editableOk && placementOk && budgetTextOk &&
       c.startVisible && c.logEmpty &&
       JSON.stringify(c.names) === JSON.stringify(['守卫1', '枪手1', '侦察兵1', '腐行者1', '撕裂者1', '疾行者1']) &&
       c.title.includes('丧尸 vs 人类');
-    // 予算バーの動作（実 input イベント経由）: 民兵 +1 → 42 点で超支赤表示 → 戻す
+    // 予算バーの動作（実 input イベント経由）: 民兵 +11 → 142 点で超支赤表示 → 戻す。
+    // さらに予算入力を 20 に下げると 32 > 20 で即超支に変わる（両バー連動）
     const budgetProbe = await evalJS(cdp, `(() => {
       const e = document.getElementById('human-militia');
       const num = document.getElementById('budget-num-human');
       const bar = document.getElementById('budget-bar-human');
+      const bi = document.getElementById('config-budget');
       const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-      const set = (v) => { d.set.call(e, String(v)); e.dispatchEvent(new Event('input', { bubbles: true })); };
-      set(1);
+      const set = (el, v) => { d.set.call(el, String(v)); el.dispatchEvent(new Event('input', { bubbles: true })); };
+      set(e, 11);
       const over = { num: num.textContent, over: bar.className.includes('over') };
-      set(0);
+      set(e, 0);
       const back = { num: num.textContent, over: bar.className.includes('over') };
-      return { over, back };
+      set(bi, 20);
+      const low = { num: num.textContent, over: bar.className.includes('over') };
+      set(bi, 100);
+      const lowBack = { num: num.textContent, over: bar.className.includes('over') };
+      return { over, back, low, lowBack };
     })()`);
-    const budgetDynOk = budgetProbe.over.num === '已用 42 / 32' && budgetProbe.over.over === true
-      && budgetProbe.back.num === '已用 32 / 32' && budgetProbe.back.over === false;
+    const budgetDynOk = budgetProbe.over.num === '已用 142 / 100' && budgetProbe.over.over === true
+      && budgetProbe.back.num === '已用 32 / 100' && budgetProbe.back.over === false
+      && budgetProbe.low.num === '已用 32 / 20' && budgetProbe.low.over === true
+      && budgetProbe.lowBack.num === '已用 32 / 100' && budgetProbe.lowBack.over === false;
     await shotFull(cdp, join(SHOT_DIR, '01-config.png'));
     return { passed: passed && budgetDynOk, names: c.names, valuesOk, editableOk, placement: c.placement,
              budgetTextOk, budgetDynOk, budgetProbe, startVisible: c.startVisible, title: c.title };

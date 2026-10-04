@@ -21,7 +21,7 @@ GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
 <!-- 配置ページ（画面 1/2。暗色テーマクラスは #16 仕様 S8 の検査対象） -->
 <section id="config-screen" class="dark-theme">
   <h2>阵营配置</h2>
-  <p class="hint">在 32 点配点预算内为两边购置「兵种×数量」（各兵种的属性固定，见行内速览；点数花超了预算条会变红），选择初始站位后点「开战」进入战场页；战斗中配置锁定，点战场页的「重置」可返回本页重新调整。</p>
+  <p class="hint">在配点预算内为两边购置「兵种×数量」（各兵种的属性固定，见行内速览；点数花超了预算条会变红），选择初始站位后点「开战」进入战场页；战斗中配置锁定，点战场页的「重置」可返回本页重新调整。</p>
   <div class="field global-field">
     <label for="config-placement">初始站位</label>
     <select id="config-placement">
@@ -29,6 +29,11 @@ GameEngine / GameUI の API ドキュメントは engine.js 冒頭の
       <option value="split">阵营分区</option>
     </select>
     <span class="field-note">混合随机：全图随机落位；阵营分区：人类居左、丧尸居右，中列空置。</span>
+  </div>
+  <div class="field global-field">
+    <label for="config-budget">配点预算</label>
+    <input type="number" id="config-budget" min="1" max="9999" step="1" value="100">
+    <span class="field-note">两边共用的总点数（1～9999 的整数），默认 100；超支的编成会被拒绝开战。</span>
   </div>
   <div id="faction-configs" class="factions"></div>
   <div id="config-error" class="error"></div>

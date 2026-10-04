@@ -99,6 +99,7 @@
       });
     });
     $('config-placement').disabled = !enabled; // 初期站位も全局設定として一緒にロック
+    $('config-budget').disabled = !enabled;    // 配点予算も同様
     $('btn-start').disabled = !enabled;
   }
 
@@ -131,13 +132,21 @@
 
   // ---- 設定パネル ----------------------------------------------------
 
-  // 陣営の予算バーを更新する（「已用 X / 32」。超支は over クラスで赤表示）
+  // 現在の配点予算（全局入力欄から。不正値は表示上は既定値へフォールバック。
+  // 開戦可否の判定はエンジンの V9 が担う）
+  function currentBudget() {
+    var v = Number($('config-budget').value);
+    if (typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= 1 && v <= 9999) return v;
+    return E.POINT_BUDGET;
+  }
+
+  // 陣営の予算バーを更新する（「已用 X / 予算」。超支は over クラスで赤表示）
   function updateBudget(f) {
     var used = 0;
     E.UNIT_TYPES[f].forEach(function (t) {
       used += (Number($(f + '-' + t.id).value) || 0) * t.cost;
     });
-    var budget = E.POINT_BUDGET;
+    var budget = currentBudget();
     var bar = $('budget-bar-' + f);
     bar.children[0].style.width = Math.min(100, (used / budget) * 100) + '%';
     bar.classList.toggle('over', used > budget);
@@ -206,10 +215,11 @@
     });
   }
 
-  // 入力欄から設定値を集める（placement は全局セレクトから）
+  // 入力欄から設定値を集める（placement / pointBudget は全局入力から）
   function readConfig() {
     var cfg = {};
     cfg.placement = $('config-placement').value;
+    cfg.pointBudget = Number($('config-budget').value);
     FACTIONS.forEach(function (f) {
       var composition = {};
       E.UNIT_TYPES[f].forEach(function (t) {
@@ -747,6 +757,9 @@
   // ---- 起動 ----------------------------------------------------------
 
   buildConfigPanel();
+  // 配点予算入力は index.html に静的に置くが、JS 側でも既定値を確認して
+  // 入れる（HTML 属性が欠けていた場合の保険。DOM 桩テストでも同じ値になる）
+  $('config-budget').value = String(E.POINT_BUDGET);
   showScreen('config');
   setSpeed('middle');
   // 速度 3 段ボタンの配線（実クリックでも GameUI.setSpeed と同じ経路を通る）
@@ -757,4 +770,9 @@
   $('btn-skip').addEventListener('click', skipToResult);
   $('btn-reset').addEventListener('click', resetToConfig);
   $('btn-clear-log').addEventListener('click', clearLog);
+  // 配点予算の変更は両陣営の予算バーに即時反映する
+  $('config-budget').addEventListener('input', function () {
+    updateBudget('human');
+    updateBudget('zombie');
+  });
 })();

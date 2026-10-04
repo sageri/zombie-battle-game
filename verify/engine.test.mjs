@@ -1047,7 +1047,7 @@ function main() {
   {
     check(!!GE.UNIT_TYPES && typeof GE.UNIT_TYPES === 'object',
       'S1: GameEngine.UNIT_TYPES が公開されている');
-    checkEq(GE.POINT_BUDGET, 32, 'S1: POINT_BUDGET は 32（固定同額）');
+    checkEq(GE.POINT_BUDGET, 100, 'S1: POINT_BUDGET の既定は 100（2026-10-04 用户裁决。両陣営同額は不変）');
     const S1_TABLE = {
       human: [
         { id: 'militia',  name: '民兵',   role: '均衡', emoji: '🧑',  hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3, cost: 10 },
@@ -1121,7 +1121,7 @@ function main() {
     placement: 'mixed',
     human: { composition: { militia: 0, guard: 1, gunner: 1, scout: 1 } },
     zombie: { composition: { walker: 0, rotwalker: 1, shredder: 1, sprinter: 1, horde: 0 } },
-  }, 'T2: 既定設定は特色三人組（composition 形状・恰 32/32 点）');
+  }, 'T2: 既定設定は特色三人組（composition 形状・32 点/予算 100）');
   checkEq(GE.validateConfig(GE.DEFAULT_CONFIG), [], '既定設定は正当（恰 32 点は合法）');
   {
     // T2: 均衡型の四属性＝旧既定値の逐値承接（期待値は旧仕様の独立写し）
@@ -1198,15 +1198,19 @@ function main() {
       'S4: 同型は 1..n の連番');
     checkEq([...new Set(s.members.map(m => m.name))].length, s.members.length,
       'S4: 名前は全編成で一意');
-    check(s.members.every(m => m.name.length <= 4), 'S4: 予算内の名前は 4 字以下');
+    check(s.members.every(m => m.name.length <= 4), 'S4: この編成の名前は 4 字以下');
     check(s.members.some(m => m.name.length === 4), 'S4: 3 字兵種名+番号（侦察兵1）は 4 字に届く');
-    // 字面ケース: 尸潮×10（2 字兵種名の予算内最大編成）——最大编号名「尸潮10」= 4 字
-    const cfgH10 = { human: { composition: { scout: 4 } }, zombie: { composition: { horde: 10 } } };
-    const sH10 = GE.createBattleState(cfgH10);
-    checkEq(GE.validateConfig(cfgH10), [], 'S4: 尸潮×10（30 点）は正当');
-    checkEq(sH10.members.filter(m => m.typeId === 'horde').map(m => m.name)[9], '尸潮10',
-      'S4: 尸潮×10 的最大编号名は「尸潮10」');
-    check(sH10.members.every(m => m.name.length <= 4), 'S4: 尸潮×10 編成でも名前は 4 字以下');
+    // 予算 100 での最大番号ケース: 尸潮×33（99 点）と 侦察兵×12（96 点）。
+    // V6（総人数 ≤36）により番号は常に 2 桁まで ⇒ 名前 ≤ 兵種名(≤3)+2 = 5 字。
+    // 5 字を超える表示は #16 の名字省略記号が受け持つ（CONTEXT「戦場」の定義どおり）
+    const cfgBig = { human: { composition: { scout: 12 } }, zombie: { composition: { horde: 33 } } };
+    const sBig = GE.createBattleState(cfgBig);
+    checkEq(GE.validateConfig(cfgBig), [], 'S4: 尸潮×33（99 点）/侦察兵×12（96 点）は予算 100 内で正当');
+    checkEq(sBig.members.filter(m => m.typeId === 'horde').map(m => m.name)[32], '尸潮33',
+      'S4: 尸潮×33 的最大编号名は「尸潮33」（4 字）');
+    checkEq(sBig.members.filter(m => m.typeId === 'scout').map(m => m.name)[11], '侦察兵12',
+      'S4: 侦察兵×12 的最大编号名は「侦察兵12」（5 字に届く境界例）');
+    check(sBig.members.every(m => m.name.length <= 5), 'S4: 予算 100 内の名前は 5 字以下（兵種名≤3+2 桁）');
   }
   // --- S2: 校验语义 V1–V8（消息原文・双陣営。T3 の承継） ---
   {
@@ -1254,14 +1258,52 @@ function main() {
       const cfg = base(); cfg.zombie.composition = { horde: 36, walker: 1 };
       const errs = GE.validateConfig(cfg);
       check(errs.includes('丧尸阵营的编成总人数不能超过 36'), 'S2 V6: 総人数 37 > 36: ' + JSON.stringify(errs));
-      check(errs.includes('丧尸阵营的编成花费 118 点，超出配点预算 32 点'), 'S2 V7: 同時に予算超過も報告');
+      check(errs.includes('丧尸阵营的编成花费 118 点，超出配点预算 100 点'), 'S2 V7: 同時に予算超過も報告（既定 100）');
     }
-    // V7 単独（総人数は 36 以内だが予算超過。恰 33 点 / 36 点の原文）
+    // V7 単独（総人数は 36 以内だが既定予算 100 を超過。恰 100 点は合法、108 点の原文）
     {
-      const cfg = base(); cfg.zombie.composition = { horde: 3, sprinter: 3 };
-      checkEq(GE.validateConfig(cfg), ['丧尸阵营的编成花费 33 点，超出配点预算 32 点'], 'S2 V7: 33 点は予算超過');
-      const cfgh = base(); cfgh.human.composition = { scout: 2, militia: 2 };
-      checkEq(GE.validateConfig(cfgh), ['人类阵营的编成花费 36 点，超出配点预算 32 点'], 'S2 V7: 36 点の原文');
+      const cfgOk = base(); cfgOk.human.composition = { militia: 10 };
+      checkEq(GE.validateConfig(cfgOk), [], 'S2 V7: 恰 100 点（民兵×10）は既定予算内で合法');
+      const cfg = base(); cfg.human.composition = { militia: 10, scout: 1 };
+      checkEq(GE.validateConfig(cfg), ['人类阵营的编成花费 108 点，超出配点预算 100 点'], 'S2 V7: 108 点の原文（既定 100）');
+    }
+    // V7（設定予算）: pointBudget で予算を上書きできる（両陣営同額で適用）
+    {
+      const cfg = base();
+      cfg.pointBudget = 30;
+      cfg.human.composition = { guard: 2, gunner: 1 };  // 人類 36 点・丧屍 trio 32 点
+      checkEq(GE.validateConfig(cfg),
+        ['人类阵营的编成花费 36 点，超出配点预算 30 点', '丧尸阵营的编成花费 32 点，超出配点预算 30 点'],
+        'S2 V7: 設定予算 30 は両陣営同額で適用される');
+      cfg.pointBudget = 36;
+      checkEq(GE.validateConfig(cfg), [], 'S2 V7: 設定予算 36 なら恰 36 点は合法');
+      cfg.pointBudget = 1;
+      cfg.human.composition = { militia: 1 };            // 10 点
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('人类阵营的编成花费 10 点，超出配点预算 1 点'), 'S2 V7: 予算 1 では民兵 1 体でも超過: ' + JSON.stringify(errs));
+      // 予算下限の境界: 1 は合法値（V9 は出ない。既定編成 32 点は V7 で超過報告）
+      const cfgB1 = base(); cfgB1.pointBudget = 1;
+      const errsB1 = GE.validateConfig(cfgB1);
+      check(errsB1.every(t => !t.includes('配点预算必须是')), 'S2 V9: 予算 1 自体は合法: ' + JSON.stringify(errsB1));
+      check(errsB1.every(t => t.includes('超出配点预算 1 点')), 'S2 V7: 予算 1 では既定編成も超過: ' + JSON.stringify(errsB1));
+    }
+    // V9: pointBudget 自体の検査（省略可。不正値は既定 100 で判定を続行）
+    for (const bad of [0, -5, 1.5, '50', 10000, null]) {
+      const cfg = base(); cfg.pointBudget = bad;
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('配点预算必须是 1～9999 的整数'),
+        'S2 V9: 予算 ' + JSON.stringify(bad) + ' は拒否: ' + JSON.stringify(errs));
+      check(errs.every(t => !t.includes('超出配点预算 100 点')),
+        'S2 V9: 不正予算でも既定 100 で編成判定は続行（既定編成 32 点は超過しない）');
+    }
+    {
+      // 不正予算 + 大編成: 判定は既定 100 基準
+      const cfg = base();
+      cfg.pointBudget = 'x';
+      cfg.human.composition = { militia: 20 };   // 200 点
+      const errs = GE.validateConfig(cfg);
+      check(errs.includes('配点预算必须是 1～9999 的整数'), 'S2 V9: 非数値予算の報告');
+      check(errs.includes('人类阵营的编成花费 200 点，超出配点预算 100 点'), 'S2 V9: 超過判定は既定 100 基準');
     }
     // 予算内の多様な編成は正当（人数は編成から内生）
     {
@@ -2472,14 +2514,18 @@ function main() {
           'S6: ' + f + '/' + t.id + ' の数量入力が既定編成どおり');
         checkEq(el.disabled, false, 'S6: ' + f + '/' + t.id + ' は未開戦で編集可');
       }
-      checkEq(DOC.getElementById('budget-num-' + f).textContent, '已用 32 / 32',
-        'S6: ' + f + ' の予算バーは既定編成で恰 32');
+      checkEq(DOC.getElementById('budget-num-' + f).textContent, '已用 32 / 100',
+        'S6: ' + f + ' の予算バーは既定編成 32 点/既定予算 100');
     }
+    // S6: 全局の配点予算入力（既定 100・未開戦で編集可）
+    checkEq(DOC.getElementById('config-budget').value, '100', 'S6: 配点予算入力の既定値は 100');
+    checkEq(DOC.getElementById('config-budget').disabled, false, 'S6: 配点予算入力は未開戦で編集可');
     // 初期站位の全局セレクト（UI 側は選択値を config.placement として渡す）
     checkEq(DOC.getElementById('config-placement').disabled, false,
       '初期站位セレクトは未開戦では編集可');
 
-    // --- S7: 予算バー（数量入力で「已用 X / 32」が同期し、超支で over が付く） ---
+    // --- S7: 予算バー（数量入力で「已用 X / 予算」が同期し、超支で over が付く。
+    //     予算入力の変更も両陣営のバーに即時反映する） ---
     {
       const fire = (id) => {
         const el = DOC.getElementById(id);
@@ -2490,17 +2536,24 @@ function main() {
       const hNum = DOC.getElementById('budget-num-human');
       setVal('human-guard', 0); setVal('human-gunner', 0); setVal('human-scout', 0);
       setVal('human-militia', 1);
-      checkEq(hNum.textContent, '已用 10 / 32', 'S7: 数量入力で予算バーが同期（10 点）');
-      setVal('human-scout', 3);
-      checkEq(hNum.textContent, '已用 34 / 32', 'S7: 34 点の表示');
+      checkEq(hNum.textContent, '已用 10 / 100', 'S7: 数量入力で予算バーが同期（10 点/予算 100）');
+      setVal('human-militia', 11);
+      checkEq(hNum.textContent, '已用 110 / 100', 'S7: 110 点の表示');
       checkEq(hBar.classList.contains('over'), true, 'S7: 超支で over クラスが付く');
-      setVal('human-scout', 2);
-      checkEq(hNum.textContent, '已用 26 / 32', 'S7: 26 点に戻す');
+      setVal('human-militia', 1); setVal('human-scout', 2);
+      checkEq(hNum.textContent, '已用 26 / 100', 'S7: 26 点に戻す');
       checkEq(hBar.classList.contains('over'), false, 'S7: 予算内に戻ると over が外れる');
-      // 既定編成へ戻す（以降の UI 流程テストは既定 trio の画面状態から進む）
+      // 予算入力を 20 に下げると表示が「/ 20」へ切り替わり、26 > 20 で即 over
+      setVal('config-budget', 20);
+      checkEq(hNum.textContent, '已用 26 / 20', 'S7: 予算入力の変更がバーに即時反映（/ 20）');
+      checkEq(hBar.classList.contains('over'), true, 'S7: 予算を下げると超支に変わる');
+      setVal('config-budget', 100);
+      checkEq(hNum.textContent, '已用 26 / 100', 'S7: 予算を戻すと over が外れる');
+      checkEq(hBar.classList.contains('over'), false, 'S7: 予算 100 では 26 点は予算内');
+      // 既定編成へ戻す（以降の UI 流程テストは既定 trio・予算 100 の状態から進む）
       setVal('human-militia', 0); setVal('human-guard', 1);
       setVal('human-gunner', 1); setVal('human-scout', 1);
-      checkEq(hNum.textContent, '已用 32 / 32', 'S7: 既定編成に復元（恰 32）');
+      checkEq(hNum.textContent, '已用 32 / 100', 'S7: 既定編成に復元（32/100）');
     }
 
     // --- S8: 設定入力 → readConfig → btn-start 経路で編成形状を検証 ---
@@ -2517,8 +2570,9 @@ function main() {
       };
       GUI.resetToConfig();
       zeroAll();
-      // DOM 桩の <select> は HTML 既定値を持たないため placement を明示する
+      // DOM 桩の <select>/<input> は HTML 既定値を持たないため全局値を明示する
       DOC.getElementById('config-placement').value = 'mixed';
+      set2('config-budget', 100);
       set2('human-militia', 1); set2('human-scout', 2);
       set2('zombie-walker', 1); set2('zombie-horde', 6);
       clickStart();
@@ -2528,17 +2582,25 @@ function main() {
         'S8: readConfig が編成形状を返し、成員が表序どおり展開される');
       GUI.resetToConfig();
       zeroAll();
+      DOC.getElementById('config-placement').value = 'mixed';
       set2('zombie-walker', 1);                          // 丧屍側は正当のまま
-      set2('human-guard', 2); set2('human-gunner', 1);  // 人類 24+12=36 点 > 32
+      set2('config-budget', 30);                         // 予算を 30 に絞る
+      set2('human-guard', 2); set2('human-gunner', 1);  // 人類 24+12=36 点 > 30
       clickStart();
       checkEq(GUI.getMode(), 'idle', 'S8: 予算超過は開戦しない');
-      check(DOC.getElementById('config-error').textContent.includes('超出配点预算'),
-        'S8: 予算超過の中文エラー: ' + DOC.getElementById('config-error').textContent);
+      check(DOC.getElementById('config-error').textContent.includes('超出配点预算 30 点'),
+        'S8: 設定予算 30 の中文エラー: ' + DOC.getElementById('config-error').textContent);
+      // V9 経由の UI 表示: 予算欄に 0 を入れて開戦 → 予算自体の中文エラー
+      set2('config-budget', 0);
+      clickStart();
+      check(DOC.getElementById('config-error').textContent.includes('配点预算必须是 1～9999 的整数'),
+        'S8: 不正予算の中文エラー: ' + DOC.getElementById('config-error').textContent);
       for (const f of ['human', 'zombie']) {
         for (const t of GE.UNIT_TYPES[f]) {
           set2(f + '-' + t.id, GE.DEFAULT_CONFIG[f].composition[t.id] || 0);
         }
       }
+      set2('config-budget', 100);
       DOC.getElementById('config-error').textContent = '';
     }
 

@@ -48,7 +48,8 @@
   GameEngine.UNIT_TYPES                 : 兵種表 { human: [4 型], zombie: [5 型] }。各型
                                           { id, name, role, emoji, hp, attack, agility,
                                             dmgMin, dmgMax, cost }。表序＝角色の作成順
-  GameEngine.POINT_BUDGET               : 配点予算（固定同額 32 点/陣営）
+  GameEngine.POINT_BUDGET               : 配点予算の既定値（100 点/陣営。両陣営同額。
+                                          config.pointBudget で開戦前に上書き可）
   GameEngine.createRng(seed)            : () => [0,1) の種付き乱数源を返す
   GameEngine.rollD(sides, rng?)         : 1..sides の整数
   GameEngine.randInt(min, max, rng?)    : min..max の整数（両端を含む）
@@ -132,13 +133,16 @@
   config = {
     placement: 'mixed' | 'split'（初期配置モード。省略 / undefined は 'mixed' 扱い。
                 null・空文字・非文字列・その他の値は検査で簡体中文エラー）,
+    pointBudget: 1..9999 の整数（省略可。配点予算。両陣営同額で既定は 100。
+                不正値は検査で簡体中文エラー、判定には既定値を使う）,
     human:  { composition: { <typeId>: 数量, ... } },
     zombie: { composition: { <typeId>: 数量, ... } }
   }
   * composition の key は当該陣営の兵種表の id（UNIT_TYPES 参照）。欠 key は
     0 扱い、未知 key は検査で簡体中文エラー。数量は各型 0..36 の整数。
-    検査（V1–V8）: 陣営/編成の欠落、未知兵種、数量の非整数、総人数 0、
-    総人数 > 36、総コスト > POINT_BUDGET（32）を簡体中文メッセージで全量収集。
+    検査（V1–V9）: 陣営/編成の欠落、未知兵種、数量の非整数、総人数 0、
+    総人数 > 36、総コスト > 予算（既定 100）、予算自体の非整数を
+    簡体中文メッセージで全量収集。
   * 各陣営の総人数は編成から内生し、1..36（9×9=81 マスに収まる上限。36+36=72 ≤ 81）。
   state = {
     members:  [ { name, faction: 'human'|'zombie', typeId, maxHp, hp, attack,
@@ -185,8 +189,9 @@
 (function () {
   'use strict';
 
-  // 仕様書の既定値（#18 仕様: 編成制。既定編成＝特色三人組、恰 32/32 点。
-  // composition の key は兵種表の全 id を明示する（0 も含む。欠 key は 0 扱い））
+  // 仕様書の既定値（#18 仕様＋2026-10-04 予算改定: 既定 100 点。既定編成＝
+  // 特色三人組 32 点（予算内に余裕）。composition の key は兵種表の全 id を
+  // 明示する（0 も含む。欠 key は 0 扱い））
   var DEFAULT_CONFIG = {
     placement: 'mixed',
     human:  { composition: { militia: 0, guard: 1, gunner: 1, scout: 1 } },
@@ -214,7 +219,9 @@
       { id: 'horde',     name: '尸潮',   role: '炮灰', emoji: '🐛', hp: 4,  attack: 3, agility: 1, dmgMin: 1, dmgMax: 2, cost: 3 }
     ]
   };
-  var POINT_BUDGET = 32;
+  // 配点予算の既定値（2026-10-04 用户裁决: 32 → 100。config.pointBudget で
+  // 開戦前に上書き可能。両陣営同額の扱いは不変）
+  var POINT_BUDGET = 100;
 
   var api = {
     // 無限ループ防止の安全上限（テストから差し替え可能）
@@ -266,8 +273,16 @@
   }
 
   // 設定を検査し、不備のメッセージ配列を返す（空配列なら正当）。
-  // #18 仕様 V1–V8: 旧「人数+四属性」検査は廃止し、編成（兵種×数量×予算）
-  // の検査に差し替える。placement 分支の文言と判定は原文どおり不変。
+  // #18 仕様 V1–V8（2026-10-04 追補: 予算は既定 100・config.pointBudget で
+  // 可変＝V9）: 旧「人数+四属性」検査は廃止し、編成（兵種×数量×予算）の
+  // 検査に差し替える。placement 分支の文言と判定は原文どおり不変。
+  // 予算は両陣営同額。不正な pointBudget は V9 で報告し、判定には既定値を使う。
+  function configBudget(config) {
+    var b = config ? config.pointBudget : undefined;
+    if (b === undefined) return POINT_BUDGET;
+    if (typeof b === 'number' && isFinite(b) && Math.floor(b) === b && b >= 1 && b <= 9999) return b;
+    return POINT_BUDGET;
+  }
   api.validateConfig = function (config) {
     var errors = [];
     // 初期配置モード: 欠落 / undefined のみ 'mixed' の既定扱い。それ以外の
@@ -276,6 +291,14 @@
     if (placement !== undefined && placement !== 'mixed' && placement !== 'split') {
       errors.push('初始站位的取值必须是 mixed 或 split');
     }
+    // V9: 配点予算は省略可（既定 100）。指定するなら 1..9999 の整数
+    var rawBudget = config ? config.pointBudget : undefined;
+    if (rawBudget !== undefined
+        && !(typeof rawBudget === 'number' && isFinite(rawBudget)
+          && Math.floor(rawBudget) === rawBudget && rawBudget >= 1 && rawBudget <= 9999)) {
+      errors.push('配点预算必须是 1～9999 的整数');
+    }
+    var budget = configBudget(config);
     var factions = ['human', 'zombie'];
     for (var i = 0; i < factions.length; i++) {
       var f = factions[i];
@@ -315,9 +338,9 @@
       if (total === 0) errors.push(label + '的编成至少要有一名角色');
       // V6: 総人数が 36 を超える（9×9=81 マスに収まる両陣営合計の上限から）
       if (total > 36) errors.push(label + '的编成总人数不能超过 36');
-      // V7: 総コストが予算を超える
-      if (cost > POINT_BUDGET) {
-        errors.push(label + '的编成花费 ' + cost + ' 点，超出配点预算 ' + POINT_BUDGET + ' 点');
+      // V7: 総コストが予算を超える（予算＝config.pointBudget、省略時は既定 100）
+      if (cost > budget) {
+        errors.push(label + '的编成花费 ' + cost + ' 点，超出配点预算 ' + budget + ' 点');
       }
     }
     return errors;

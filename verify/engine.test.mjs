@@ -981,6 +981,61 @@ function main() {
   }
   console.log('[progress] engine loaded, failures=' + failures.length);
 
+  // --- S1 兵種表と配点予算（#18 仕様: 編成制の前提データ。期待値は仕様表の独立写し） ---
+  {
+    check(!!GE.UNIT_TYPES && typeof GE.UNIT_TYPES === 'object',
+      'S1: GameEngine.UNIT_TYPES が公開されている');
+    checkEq(GE.POINT_BUDGET, 32, 'S1: POINT_BUDGET は 32（固定同額）');
+    const S1_TABLE = {
+      human: [
+        { id: 'militia',  name: '民兵',   role: '均衡', emoji: '🧑',  hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3, cost: 10 },
+        { id: 'guard',    name: '守卫',   role: '肉盾', emoji: '🛡️', hp: 20, attack: 3, agility: 3, dmgMin: 1, dmgMax: 2, cost: 12 },
+        { id: 'gunner',   name: '枪手',   role: '火力', emoji: '🔫', hp: 8,  attack: 6, agility: 2, dmgMin: 1, dmgMax: 6, cost: 12 },
+        { id: 'scout',    name: '侦察兵', role: '游击', emoji: '🏃', hp: 9,  attack: 3, agility: 6, dmgMin: 1, dmgMax: 3, cost: 8 },
+      ],
+      zombie: [
+        { id: 'walker',    name: '丧尸',   role: '均衡', emoji: '🧟', hp: 9,  attack: 5, agility: 2, dmgMin: 1, dmgMax: 5, cost: 10 },
+        { id: 'rotwalker', name: '腐行者', role: '肉盾', emoji: '🦠', hp: 18, attack: 4, agility: 1, dmgMin: 1, dmgMax: 3, cost: 12 },
+        { id: 'shredder',  name: '撕裂者', role: '火力', emoji: '🩸', hp: 7,  attack: 6, agility: 1, dmgMin: 2, dmgMax: 6, cost: 12 },
+        { id: 'sprinter',  name: '疾行者', role: '游击', emoji: '💨', hp: 8,  attack: 4, agility: 5, dmgMin: 1, dmgMax: 4, cost: 8 },
+        { id: 'horde',     name: '尸潮',   role: '炮灰', emoji: '🐛', hp: 4,  attack: 3, agility: 1, dmgMin: 1, dmgMax: 2, cost: 3 },
+      ],
+    };
+    checkEq(GE.UNIT_TYPES.human.length, 4, 'S1: 人類兵種は 4 型');
+    checkEq(GE.UNIT_TYPES.zombie.length, 5, 'S1: 丧屍兵種は 5 型');
+    for (const f of ['human', 'zombie']) {
+      const ids = new Set();
+      for (const t of GE.UNIT_TYPES[f]) {
+        checkEq(t, S1_TABLE[f].find((x) => x.id === t.id),
+          'S1: 兵種表 ' + f + '/' + t.id + ' は仕様表どおり（全字段独立写し）');
+        check(!ids.has(t.id), 'S1: 兵種 id は陣営内で一意: ' + t.id);
+        ids.add(t.id);
+        check(Number.isInteger(t.cost) && t.cost > 0, 'S1: cost は正の整数: ' + f + '/' + t.id);
+        check(t.hp >= 1 && t.hp <= 9999, 'S1: hp は旧数値境界 1..9999: ' + f + '/' + t.id);
+        check(t.attack >= 0 && t.attack <= 99, 'S1: attack は旧数値境界 0..99: ' + f + '/' + t.id);
+        check(t.agility >= 0 && t.agility <= 99, 'S1: agility は旧数値境界 0..99: ' + f + '/' + t.id);
+        check(t.dmgMin >= 0 && t.dmgMin <= 9999 && t.dmgMax >= 0 && t.dmgMax <= 9999,
+          'S1: 伤害区間は旧数値境界 0..9999: ' + f + '/' + t.id);
+        check(t.dmgMin <= t.dmgMax, 'S1: 伤害下限 ≤ 上限: ' + f + '/' + t.id);
+        check(typeof t.emoji === 'string' && t.emoji.length > 0, 'S1: emoji は空でない: ' + f + '/' + t.id);
+        check(t.cost <= GE.POINT_BUDGET, 'S1: 単体コストは予算内: ' + f + '/' + t.id);
+      }
+      // 裏取り: 期待表側の id もすべて実表に現れる（両方向の過不足なし）
+      for (const x of S1_TABLE[f]) {
+        check(GE.UNIT_TYPES[f].some((t) => t.id === x.id), 'S1: 仕様表の ' + x.id + ' が実表に存在: ' + f);
+      }
+    }
+    // 均衡型＝現行既定属性（militia / walker。同种子战斗与今日逐条一致的基盤）
+    const m = GE.UNIT_TYPES.human.find((t) => t.id === 'militia');
+    checkEq({ hp: m.hp, attack: m.attack, agility: m.agility, dmgMin: m.dmgMin, dmgMax: m.dmgMax },
+      { hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3 },
+      'S1: militia の四属性は旧 human 既定値と一致');
+    const w = GE.UNIT_TYPES.zombie.find((t) => t.id === 'walker');
+    checkEq({ hp: w.hp, attack: w.attack, agility: w.agility, dmgMin: w.dmgMin, dmgMax: w.dmgMax },
+      { hp: 9, attack: 5, agility: 2, dmgMin: 1, dmgMax: 5 },
+      'S1: walker の四属性は旧 zombie 既定値と一致');
+  }
+
   // --- ダイス・スクリプトヘルパの裏付け（rollD / randInt の公表セマンティクス） ---
   checkEq(GE.rollD(7, () => 0), 1, 'rollD(7) の下端');
   checkEq(GE.rollD(7, () => rawForDie(7, 7)), 7, 'rollD(7) の上端');

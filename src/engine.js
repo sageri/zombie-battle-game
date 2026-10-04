@@ -186,12 +186,34 @@
   var NAME_PREFIX = { human: '玩家', zombie: '丧尸' };
   var FACTION_LABEL = { human: '人类阵营', zombie: '丧尸阵营' };
 
+  // 兵種表と配点予算（#18 仕様: 編成制。兵種＝固定四属性テンプレート＋
+  // 点数コスト。表序＝その陣営の角色の作成順。均衡型 militia / walker は
+  // 従来の既定属性と同値＝同一シードの戦闘結果が今日と逐条一致する基盤）
+  var UNIT_TYPES = {
+    human: [
+      { id: 'militia',  name: '民兵',   role: '均衡', emoji: '🧑',  hp: 12, attack: 4, agility: 4, dmgMin: 1, dmgMax: 3, cost: 10 },
+      { id: 'guard',    name: '守卫',   role: '肉盾', emoji: '🛡️', hp: 20, attack: 3, agility: 3, dmgMin: 1, dmgMax: 2, cost: 12 },
+      { id: 'gunner',   name: '枪手',   role: '火力', emoji: '🔫', hp: 8,  attack: 6, agility: 2, dmgMin: 1, dmgMax: 6, cost: 12 },
+      { id: 'scout',    name: '侦察兵', role: '游击', emoji: '🏃', hp: 9,  attack: 3, agility: 6, dmgMin: 1, dmgMax: 3, cost: 8 }
+    ],
+    zombie: [
+      { id: 'walker',    name: '丧尸',   role: '均衡', emoji: '🧟', hp: 9,  attack: 5, agility: 2, dmgMin: 1, dmgMax: 5, cost: 10 },
+      { id: 'rotwalker', name: '腐行者', role: '肉盾', emoji: '🦠', hp: 18, attack: 4, agility: 1, dmgMin: 1, dmgMax: 3, cost: 12 },
+      { id: 'shredder',  name: '撕裂者', role: '火力', emoji: '🩸', hp: 7,  attack: 6, agility: 1, dmgMin: 2, dmgMax: 6, cost: 12 },
+      { id: 'sprinter',  name: '疾行者', role: '游击', emoji: '💨', hp: 8,  attack: 4, agility: 5, dmgMin: 1, dmgMax: 4, cost: 8 },
+      { id: 'horde',     name: '尸潮',   role: '炮灰', emoji: '🐛', hp: 4,  attack: 3, agility: 1, dmgMin: 1, dmgMax: 2, cost: 3 }
+    ]
+  };
+  var POINT_BUDGET = 32;
+
   var api = {
     // 無限ループ防止の安全上限（テストから差し替え可能）
     MAX_STEPS: 100000,
     DEFAULT_CONFIG: DEFAULT_CONFIG,
     FACTION_LABEL: FACTION_LABEL,
-    NAME_PREFIX: NAME_PREFIX
+    NAME_PREFIX: NAME_PREFIX,
+    UNIT_TYPES: UNIT_TYPES,
+    POINT_BUDGET: POINT_BUDGET
   };
 
   // ---- 乱数 ----------------------------------------------------------

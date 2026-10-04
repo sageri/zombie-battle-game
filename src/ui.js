@@ -637,7 +637,7 @@
     mode = 'live';
     updatePowerPane();
     appendLog();
-    // 開戦直後は 1 拍置いてから最初の行動へ（阵容と順序帯を一望させる）
+    // 開戦直後は 1 拍置いてから最初の行動へ（メンバーと順序帯を一望させる）
     var firstName = state.order[state.turnIndex];
     updateStrip(firstName);
     setCurrentMarker(firstName);

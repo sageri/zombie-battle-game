@@ -1,5 +1,5 @@
   /* =====================================================================
-   * 暗色末日主題（#16 規格: 原型 A「転播 HUD」の変数基線。対比度の微調整以外
+   * 暗色末日テーマ（#16 仕様: 原型 A「転播 HUD」の変数基線。対比度の微調整以外
    * の色変更は禁止）。最小設計幅 ~1280px — 更窄では横方向スクロールする
    * ===================================================================== */
   :root {
@@ -9,10 +9,10 @@
     --human: #5ad1c8; --human-deep: #1d6f6a;
     --zombie: #e5484d; --zombie-deep: #7a1f24;
     --gold: #e8c268;
-    /* 演出尺（#16 規格。値は ui.js の FX_DUR と意味対応。CSS 変数でだけ管理） */
-    --dur-shake: .4s;   /* 首接戰: 震屏＋紅暈 */
-    --dur-spot: .9s;    /* 倒地: 聚光暗場 */
-    --dur-freeze: .6s;  /* 終局: 定格 */
+    /* 演出尺（#16 仕様。ui.js の FX_DUR と必ず一致させること） */
+    --dur-shake: .4s;   /* 初接戦: 画面シェイク＋赤縁グロー */
+    --dur-spot: .9s;    /* 倒地: スポットライト暗転 */
+    --dur-freeze: .6s;  /* 終局: フリーズ */
   }
   * { box-sizing: border-box; }
   body {
@@ -27,7 +27,7 @@
       radial-gradient(900px 500px at 50% 115%, #1c1216 0%, transparent 55%),
       var(--bg);
   }
-  /* 廃土の質感: 微かな走査線＋暗隅（畫像は使わない。裏層なので觸れない） */
+  /* 廃土の質感: 微かな走査線＋暗隅（画像は使わない。最背面層なので触れない） */
   body::after {
     content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 3;
     background:
@@ -77,7 +77,7 @@
   button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
   button.small { padding: 1px 10px; font-size: 12px; font-weight: normal; }
 
-  /* ---- 戦場ページ三欄骨組み（#16: 左=態勢 / 中=戰場 / 右=日志） -------- */
+  /* ---- 戦場ページ 3 カラム骨組み（#16: 左=態勢ゲージ / 中=戦場 / 右=ログ） -------- */
   .battle-columns {
     display: grid;
     grid-template-columns: 250px minmax(620px, auto) 330px;
@@ -148,7 +148,7 @@
     padding: 6px;
     box-shadow: 0 18px 50px rgba(0, 0, 0, .55), inset 0 0 40px rgba(0, 0, 0, .5);
   }
-  /* マス辺長 64px は ui.js の CELL_PX と必ず一致させること（#16 規格） */
+  /* マス辺長 64px は ui.js の CELL_PX と必ず一致させること（#16 仕様） */
   #battle-grid {
     position: relative;
     display: grid;
@@ -161,7 +161,7 @@
   }
   .grid-cell.alt { background-color: #101623; }
 
-  /* ---- キャラカード（マス内カード: Emoji + ミニ血条 + 常顯名前） --------- */
+  /* ---- キャラカード（マス内カード: Emoji + ミニ血条 + 常時表示名前） --------- */
   .unit-card {
     position: absolute; left: 0; top: 0;
     width: 64px; height: 64px;
@@ -185,8 +185,9 @@
     outline: 1.5px solid rgba(255, 255, 255, .55); outline-offset: 1px;
     z-index: 3;
   }
-  /* 倒地（#16 規格: 灰化＋盖章）: 聚光の拍に烙印を押し、そのまま薄れながら
-     消える（JS タイマー不使用。クラスは残すので検査は classList で成立つ） */
+  /* 倒地（#16 仕様: グレースケール＋スタンプ）: 倒地拍に「倒地」スタンプを押し、
+     そのまま薄れながら消える（JS タイマー不使用。クラスは残すので検査は
+     classList で成立つ） */
   .unit-card.downed {
     pointer-events: none;
     filter: grayscale(1);
@@ -212,9 +213,10 @@
   .hp-fill { height: 100%; width: 100%; border-radius: 3px; transition: width .45s ease; }
   .unit-card.human .hp-fill { background: linear-gradient(90deg, var(--human-deep), var(--human)); }
   .unit-card.zombie .hp-fill { background: linear-gradient(90deg, var(--zombie-deep), var(--zombie)); }
-  /* 常顯名前（#16 規格: 4 字超は省略記号。data は全文を保持する） */
+  /* 常時表示名前（#16 仕様: 4 字超は省略記号。data は全文を保持する。
+     10px 全角 4 字 = 40px が上限なので、5 字目から必ず「…」に丸まる） */
   .unit-name {
-    max-width: 58px; font-size: 10px; line-height: 1.1; color: var(--ink-dim);
+    max-width: 43px; font-size: 10px; line-height: 1.1; color: var(--ink-dim);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
@@ -234,24 +236,27 @@
   }
 
   /* ---- 被弾ライトアニメ（赤フラッシュ） -------------------------------- */
-  /* transform はマス位置の保持に使うため觸れない（margin 揺れも不要と判断し
-     色の脈動だけに絞った — 原型 A の hitflash と同じ構成） */
+  /* transform はマス位置の保持に使うため触らない（原型 A の hitflash と同じく
+     色の脈動だけに絞る） */
   .unit-card.hit-flash { animation: hit-flash .38s ease; }
   @keyframes hit-flash {
     0%   { background: rgba(229, 72, 77, .55); }
     100% { background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .015)); }
   }
 
-  /* ---- 意図層・關鍵時刻演出の覆い（骨組み層。grid の子数は不変） -------- */
+  /* ---- 意図層・重要シーン演出の覆い（骨組み層。grid の子数は不変） -------- */
   #intent-layer {
     position: absolute; left: 6px; top: 6px;   /* #battlefield の padding 6px と一致 */
     width: 576px; height: 576px;               /* 9×64px。CELL_PX と一致させること */
     pointer-events: none; z-index: 1; overflow: visible;
   }
-  /* 意図は拍の頭で掃き出されるまで残る（~1200ms のフェードが足跡の残影） */
+  /* 意図は次拍の頭で消されるまで残る（~1200ms のフェード＋陣営色のグローが
+     足跡の発光残像を兼ねる） */
   .intent-svg { position: absolute; left: 0; top: 0; animation: intent-fade 1.2s ease-out forwards; }
   .intent-svg line { stroke-width: 2; opacity: .8; fill: none; }
   .intent-svg circle { fill: none; stroke-width: 1.5; opacity: .7; }
+  .intent-svg.intent-human { filter: drop-shadow(0 0 4px rgba(90, 209, 200, .55)); }
+  .intent-svg.intent-zombie { filter: drop-shadow(0 0 4px rgba(229, 72, 77, .55)); }
   .intent-svg.intent-human line, .intent-svg.intent-human circle { stroke: var(--human); }
   .intent-svg.intent-zombie line, .intent-svg.intent-zombie circle { stroke: var(--zombie); }
   @keyframes intent-fade {
@@ -274,9 +279,9 @@
     background: radial-gradient(ellipse at center, transparent 28%, rgba(5, 7, 11, .82) 76%);
   }
   .fx-spot.on { animation: fx-spot var(--dur-spot); }
-  /* 震屏は transform を #battlefield に掛ける（卡の transform とは独立） */
+  /* 画面シェイクは transform を #battlefield に掛ける（カードの transform とは独立） */
   #battlefield.fx-shake { animation: fx-shake var(--dur-shake); }
-  /* 終局の定格（跳到結果でも同じ演出で着地する） */
+  /* 終局のフリーズ（跳到結果でも同じ演出で着地する） */
   #battlefield.fx-freeze { animation: fx-freeze var(--dur-freeze); }
   @keyframes fx-redge { 0% { opacity: 0; } 30% { opacity: 1; } 100% { opacity: 0; } }
   @keyframes fx-spot { 0% { opacity: 0; } 25% { opacity: 1; } 75% { opacity: 1; } 100% { opacity: 0; } }
@@ -303,7 +308,7 @@
   #banner-title { font-size: 18px; font-weight: bold; margin: 2px 0; color: var(--gold); }
   .banner-body { white-space: pre-line; margin: 2px 0; font-size: 14px; font-family: inherit; color: var(--ink); }
 
-  /* ---- 戦闘ログ（三級分層: 關鍵行の強調＋行動行の陣営色＋通常行） --------- */
+  /* ---- 戦闘ログ（三級分層: 重要行の強調＋行動行の陣営色＋通常行） --------- */
   .log {
     font-family: Consolas, "Courier New", monospace;
     font-size: 13px;

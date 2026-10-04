@@ -38,8 +38,8 @@
   };
   var SPEED_ORDER = ['slow', 'middle', 'fast'];
 
-  // 關鍵時刻演出の尺 ms（#16 規格。styles.css の --dur-shake / --dur-spot と
-  // 必ず一致させること。次拍の遅延增量の算出にだけ使う）
+  // 重要シーン演出の尺 ms（#16 仕様。styles.css の --dur-shake / --dur-spot と
+  // 必ず一致させること。次ステップの遅延増分の算出にだけ使う）
   var FX_DUR = { shake: 400, spot: 900 };
 
   // ---- スケジューラ --------------------------------------------------
@@ -91,15 +91,15 @@
   var battleGen = 0;        // 戦闘ごとの代号（開戦/リセットで++、过期回调の無効化）
   var pendingTimer = null;  // 予約済みの次ステップ
   var renderedLogCount = 0; // 画面に描画済みの log 先頭数（追記描画用）
-  var firstContactSeen = false; // 初接戰（初の命中）をまだ演出していないか
-  var firstHitRowLogged = false; // 初接戰行（初の命中行）をまだ描いていないか
+  var firstContactSeen = false; // 初接戦（初の命中）をまだ演出していないか
+  var firstHitRowLogged = false; // 初接戦行（初の命中行）をまだ描いていないか
   var cardRefs = {};        // 名前 → { card, emoji, fill, float }
   var chipRefs = {};        // 名前 → { chip, emoji }
 
   // ---- 戦場グリッド定数 ----------------------------------------------
   // CSS 側（.grid-cell / .unit-card の 64px）と必ず一致させること
   var GRID_SIZE = 9;        // 一辺のマス数（エンジンの 9×9 と一致）
-  var CELL_PX = 64;         // 1 マスの辺長 px（#16 規格: 64px 固定）
+  var CELL_PX = 64;         // 1 マスの辺長 px（#16 仕様: 64px 固定）
 
   // ---- 小道具 --------------------------------------------------------
 
@@ -183,8 +183,8 @@
 
   // 戦場を一度だけ組み立てる: 81 マス＋全カード（以後は updateCards で更新）。
   // カードはマスの中に絶対配置し、transform の遷移で滑り移動する。
-  // 子序は凍結面: [0]emoji [1]血条 [2]飄字層。名前は末尾 [3] に追加する
-  // （#16 規格: 名前常顯。4 字超は CSS 側で省略記号に丸める）
+  // 子順は凍結面: [0]emoji [1]血条 [2]飄字層。名前は末尾 [3] に追加する
+  // （#16 仕様: 名前は常時表示。4 字超は CSS 側で省略記号に丸める）
   function buildCards() {
     cardRefs = {};
     var grid = $('battle-grid');
@@ -293,8 +293,8 @@
     }
   }
 
-  // 態勢條（#16 規格）: 両陣営の「存活 hp 合計 / maxHp 合計」を毎拍集計して
-  // 左欄の双條へ反映する。純呈現の集計で、結算（エンジン）には觸れない
+  // 態勢ゲージ（#16 仕様）: 両陣営の「存活 hp 合計 / maxHp 合計」を毎拍集計して
+  // 左欄の双バーへ反映する。純表示の集計で、エンジンの決着処理には触れない
   function updatePowerPane() {
     if (!state) return;
     var sum = { human: 0, zombie: 0 };
@@ -339,11 +339,11 @@
     r.card.classList.add('hit-flash');
   }
 
-  // ---- 意図提示（#16 規格）--------------------------------------------
-  // move 拍だけ描く: 移動元→移動先への虛線と目標格の円環。座標は格中心の
-  // 純計算（getBoundingClientRect に依らないので描画結果が環境で変わらない）。
-  // 掃除は JS タイマーを使わず「次拍の頭で丸ごと掃除」（飄字と同じ方式。
-  // CSS 側の ~1200ms フェードが移動足跡の残影を兼ねる）
+  // ---- 意図提示（#16 仕様）--------------------------------------------
+  // move 拍だけ描く: 移動前→移動後マスへの破線と目標マスのリング。座標は
+  // マス中心の純計算（getBoundingClientRect に依らないので描画結果が環境で
+  // 変わらない）。掃除は JS タイマーを使わず「次拍の頭で丸ごと消す」
+  // （飄字と同じ方式。CSS 側の ~1200ms フェードが移動足跡の残像を兼ねる）
   function clearIntent() {
     $('intent-layer').innerHTML = '';
   }
@@ -375,7 +375,7 @@
     $('intent-layer').appendChild(svg);
   }
 
-  // ---- 關鍵時刻演出（#16 規格）----------------------------------------
+  // ---- 重要シーン演出（#16 仕様）--------------------------------------
   // すべて「クラス付与 + CSS アニメの自己完結」で表現し、JS タイマーは
   // 一切使わない（1 pump == 1 step の不変量を守るため）。再始動は
   // 付け外し + 強制リフローで行う（飄字の flashCard と同じ方式）
@@ -403,8 +403,8 @@
   }
 
   // まだ描画していないログ行だけを追記し、最下部へ自動スクロールする。
-  // 三級分層（#16 規格）: 關鍵行（倒地/初接戰/終局）に log-key、行動行に陣営色を
-  // 追加する。本文と log-<type> の判定は凍結面なので觸れない
+  // 三級分層（#16 仕様）: 重要行（倒地/初接戦/終局）に log-key、行動行に陣営色を
+  // 追加する。本文と log-<type> の判定は凍結面なので触れない
   function appendLog() {
     if (!state || renderedLogCount >= state.log.length) return;
     var box = $('battle-log');
@@ -495,17 +495,17 @@
     if (state.finished) {
       finishBattle();
     } else {
-      // 關鍵拍は演出尺が基本遅延に追いつくまで次拍の待ちを延ばす
-      // （尺 ≤ 基本遅延なら增量 0。予約は常に 1 件なので pump 不変量は守られる）
+      // 重要シーンの拍は演出尺が基本遅延に追いつくまで次拍の待ちを延ばす
+      // （尺 ≤ 基本遅延なら増分 0。予約は常に 1 件なので pump 不変量は守られる）
       var base = SPEEDS[speedKey].delay;
       scheduleNext(base + Math.max(0, fxMs - base));
     }
   }
 
-  // 1 ステップ分の結算結果を画面へ反映する（飄字・アニメ・血条・順序帯・日志）。
+  // 1 ステップ分の結果を画面へ反映する（飄字・アニメ・血条・順序帯・ログ）。
   // move は updateCards の transform 更新だけで滑り移動が表現され、
   // blocked はカードの動きなしでログだけが残る。戻り値はこの拍で始動した
-  // 關鍵時刻演出の尺 ms（なければ 0。doStep が次拍の遅延に加算する）
+  // 重要シーン演出の尺 ms（なければ 0。doStep が次拍の遅延に加算する）
   function applyEvent(ev) {
     clearFloats();
     clearIntent();
@@ -525,14 +525,15 @@
       floatOn(ev.target, '-' + ev.damage + (ev.downed ? ' 倒地' : ''), 'float-damage');
       flashCard(ev.target);
       if (!firstContactSeen) {
-        // 初接戰（初めてダメージが入った拍）: 震屏＋紅暈。以後の命中では再演しない
+        // 初接戦（初めてダメージが入った拍）: 画面シェイク＋赤縁グロー。
+        // 以後の命中では再演しない
         firstContactSeen = true;
         retriggerFx($('battlefield'), 'fx-shake');
         retriggerFx($('fx-redge'), 'on');
         fxMs = FX_DUR.shake;
       }
       if (ev.downed) {
-        // 倒地: 聚光暗場
+        // 倒地: スポットライト暗転
         retriggerFx($('fx-spot'), 'on');
         if (FX_DUR.spot > fxMs) fxMs = FX_DUR.spot;
       }
@@ -547,7 +548,7 @@
     return fxMs;
   }
 
-  // 終局表示へ移る（順序帯の強調を外し、横幅を出す。終局の定格演出を添える）
+  // 終局表示へ移る（順序帯の強調を外し、横幅を出す。終局フリーズ演出を添える）
   function finishBattle() {
     mode = 'done';
     pendingTimer = null;

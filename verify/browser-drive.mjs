@@ -322,7 +322,7 @@ const STRUCT_EXPR = `(() => {
   };
 })()`;
 
-// カードの transform 期待値（ui.js の transformFor と CELL_PX=64 に一致。#16 規格）
+// カードの transform 期待値（ui.js の transformFor と CELL_PX=64 に一致。#16 仕様）
 const transformFor = (pos) => 'translate(' + (pos.col - 1) * 64 + 'px, ' + (pos.row - 1) * 64 + 'px)';
 
 // 移動演出の観測プローブ: 移動ログ行数と全カード transform の指紋
@@ -716,10 +716,10 @@ async function main() {
       await shotViewport(cdp, join(SHOT_DIR, '02-battlefield.png'));
     }
 
-    // ---- 呈现接縫の実測（#16 規格: 態勢條 / 意図 SVG / 倒地の聚光） ----
-    // 態勢條: 双條の幅が state からの独立計算（Σ存活hp/ΣmaxHp）と一致するか。
+    // ---- 表示シームの実測（#16 仕様: 態勢ゲージ / 意図 SVG / 倒地のスポットライト） ----
+    // 態勢ゲージ: 双バーの幅が state からの独立計算（Σ存活hp/ΣmaxHp）と一致するか。
     // 実 DOM の CSSOM は設定文字列を丸めて読み返す（91.666666…% → 91.6667%）
-    // ため、比較は數值（±0.001%）で行う。スタブ検査（engine.test.mjs）は
+    // ため、比較は数値（±0.001%）で行う。スタブ検査（engine.test.mjs）は
     // 設定文字列そのものを検査しているので両者で役割分担になる
     const powerPaneOk = await evalJS(cdp, `(() => {
       const st = window.GameUI.getBattleState();
@@ -743,7 +743,7 @@ async function main() {
     })()`);
 
     // 意図 SVG: 「ここから」の移動拍を待ち、移動行の from→to と座標（格中心
-    // 64px 算例）を照合（blocked 拍は意図を描かないので移動行のみで待つ）
+    // 64px の独立計算）を照合（blocked 拍は意図を描かないので移動行のみで待つ）
     const movesBase = await evalJS(cdp, "document.querySelectorAll('#battle-log .log-action-move').length");
     const moveAppeared2 = await waitFor(cdp,
       `document.querySelectorAll('#battle-log .log-action-move').length > ${movesBase}`,
@@ -770,7 +770,7 @@ async function main() {
       };
     })()`);
 
-    // 倒地拍の聚光: 「，倒地！」行が出た拍で #fx-spot に on クラス（中速 800ms＋
+    // 倒地拍のスポットライト: 「，倒地！」行が出た拍で #fx-spot に on クラス（中速 800ms＋
     // 演出尺 900ms の猶予内に観測する。次拍の頭で外れる）
     const downedWaited = await waitFor(cdp,
       "[...document.querySelectorAll('#battle-log .log-action-hit')].some((r) => r.textContent.includes('，倒地！'))",
@@ -860,7 +860,7 @@ async function main() {
       c.banner.title.includes((c.winner === 'human' ? '人类阵营' : '丧尸阵营')) && c.banner.title.includes('获胜');
     const settledOk = c.activeChips === 0 && c.currentCards === 0 && c.floats === 0;
 
-    // 三級分層の実測（#16: 倒地/初接戰/終局行は log-key、行動行は陣営色）
+    // 三級分層の実測（#16: 倒地/初接戦/終局行は log-key、行動行は陣営色）
     const keyTargets = c.log.filter((x) => x.text.indexOf('，倒地！') >= 0
       || x.text.indexOf('战斗结束') === 0 || x.text.indexOf('已达 ') === 0);
     const keyRowsOk = keyTargets.length > 0 && keyTargets.every((x) => (x.cls || '').indexOf('log-key') >= 0);

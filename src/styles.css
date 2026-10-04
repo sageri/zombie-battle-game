@@ -66,6 +66,40 @@
   .field input:focus, .field select:focus { outline: 1px solid var(--human); }
   .field.global-field { margin: 8px 0 2px; font-weight: bold; }
   .field .field-note { font-weight: normal; color: var(--ink-dim); font-size: 12px; }
+  /* 兵種行＋数量入力＋予算バー（#18 仕様: 編成制。暗色変数体系の上に載せる） */
+  .unit-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 6px; margin: 2px 0; font-size: 13px;
+    border-radius: 4px;
+  }
+  .unit-row:hover { background: rgba(255, 255, 255, .03); }
+  .unit-row .unit-emoji { width: 20px; text-align: center; font-size: 15px; }
+  .unit-row .unit-name { width: 48px; color: var(--ink); font-weight: bold; }
+  .unit-row .unit-role {
+    width: 34px; text-align: center; font-size: 11px;
+    color: var(--ink-dim); border: 1px solid var(--line); border-radius: 3px;
+  }
+  .unit-row .unit-stats { flex: 1; color: var(--ink-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .unit-row .unit-cost { color: var(--gold); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .unit-row input {
+    width: 56px; padding: 3px 5px;
+    background: #0c1017; border: 1px solid var(--line); color: var(--ink);
+    border-radius: 4px; text-align: right;
+  }
+  .unit-row input:focus { outline: 1px solid var(--human); }
+  .budget-bar {
+    height: 10px; border-radius: 5px; background: #1a212e;
+    overflow: hidden; border: 1px solid #232b3b; margin-top: 8px;
+  }
+  .budget-fill { height: 100%; width: 0; background: linear-gradient(90deg, #2c5a54, var(--human)); transition: width .25s ease; }
+  fieldset.faction.zombie .budget-fill { background: linear-gradient(90deg, #5a2326, var(--zombie)); }
+  .budget-bar.over { border-color: var(--zombie); box-shadow: 0 0 8px rgba(229, 72, 77, .5); }
+  .budget-bar.over .budget-fill { background: linear-gradient(90deg, #7a1f24, #ff7b80); }
+  .budget-num {
+    font-size: 12px; color: var(--ink-dim); text-align: right; margin-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .budget-bar.over ~ .budget-num { color: #ff7b80; font-weight: bold; }
   .error { color: #ff7b80; font-size: 14px; min-height: 1.2em; margin: 8px 0 4px; }
   .actions { margin: 4px 0 8px; }
   button {
